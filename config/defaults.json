@@ -1,0 +1,14 @@
+{
+    "symbol": "BTCUSDT",
+    "capital_usdt": 150,
+    "num_levels": 5,
+    "min_spacing_pct": 0.006,
+    "atr_multiplier": 1.5,
+    "order_size_usdt": 25,
+    "leverage": 1,
+    "adx_threshold": 25,
+    "ema_fast": 50,
+    "ema_slow": 200,
+    "max_drawdown_pct": 0.15,
+    "max_daily_loss_pct": 0.01
+}
