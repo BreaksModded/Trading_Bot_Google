@@ -30,16 +30,21 @@ async def get_market_data(request: Request, username: str = Depends(verify_token
 @router.get("/trading/klines")
 async def get_klines(
     request: Request,
+    symbol: str = Query(None, description="Trading pair symbol"),
     interval: str = Query("60", description="Kline interval (1, 5, 15, 60, 240, D)"),
     limit: int = Query(200, ge=10, le=1000),
     username: str = Depends(verify_token),
 ):
     """Get historical kline data for the chart."""
     exchange = request.app.state.exchange
+    settings = request.app.state.settings
+    
+    target_symbol = symbol or (settings.active_symbols[0] if settings.active_symbols else "BTCUSDC")
+    
     try:
-        df = await exchange.get_klines(interval=interval, limit=limit)
+        # Pass the resolved symbol to get_klines
+        df = await exchange.get_klines(symbol=target_symbol, interval=interval, limit=limit)
         klines = df.to_dict(orient="records")
-        # Convert timestamps to strings for JSON serialization
         for row in klines:
             if hasattr(row.get("timestamp"), "isoformat"):
                 row["timestamp"] = row["timestamp"].isoformat()
@@ -64,14 +69,16 @@ async def get_grid_state(request: Request, username: str = Depends(verify_token)
 @router.get("/trading/trades")
 async def get_trade_history(
     request: Request,
+    symbol: str = Query(None, description="Filter by generic symbol"),
     limit: int = Query(50, ge=1, le=500),
     offset: int = Query(0, ge=0),
     username: str = Depends(verify_token),
 ):
     """Get trade history with pagination."""
     db = request.app.state.db
-    trades = db.get_recent_trades(limit=limit, offset=offset)
-    total = db.get_trade_count()
+    # Pass symbol filter to db
+    trades = db.get_recent_trades(limit=limit, offset=offset, symbol=symbol)
+    total = db.get_trade_count(symbol=symbol)
 
     return {
         "trades": trades,

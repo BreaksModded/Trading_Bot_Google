@@ -59,11 +59,11 @@ def compute_adx(df: pd.DataFrame, period: int = 14) -> pd.Series:
         axis=1,
     )
     true_range = tr_components.max(axis=1)
-    atr = true_range.ewm(alpha=1 / period, adjust=False).mean().replace(0, pd.NA)
+    atr = true_range.ewm(alpha=1 / period, adjust=False).mean().replace(0, float('nan'))
 
     plus_di = (100 * plus_dm.ewm(alpha=1 / period, adjust=False).mean() / atr).fillna(0.0)
     minus_di = (100 * minus_dm.ewm(alpha=1 / period, adjust=False).mean() / atr).fillna(0.0)
-    denominator = (plus_di + minus_di).replace(0, pd.NA)
+    denominator = (plus_di + minus_di).replace(0, float('nan'))
     dx = (100 * (plus_di - minus_di).abs() / denominator).fillna(0.0)
     adx = dx.ewm(alpha=1 / period, adjust=False).mean()
     return adx
@@ -73,7 +73,7 @@ def compute_volume_ratio(series: pd.Series, period: int = 20) -> pd.Series:
     """Return current volume / SMA(volume, period) ratio."""
     if period <= 0:
         raise ValueError("Volume ratio period must be positive.")
-    sma_vol = series.rolling(window=period, min_periods=1).mean().replace(0, pd.NA)
+    sma_vol = series.rolling(window=period, min_periods=1).mean().replace(0, float('nan'))
     return (series / sma_vol).fillna(0.0)
 
 

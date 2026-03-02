@@ -11,6 +11,10 @@ const APP = {
     refreshInterval: null,
     charts: {},
     currentPanel: 'overview',
+    selectedSymbol: 'Overview',
+    activeSymbolsCache: [],
+    username: localStorage.getItem('bot_user') || null,
+    password: localStorage.getItem('bot_pass') || null,
 };
 
 // ── API Client ───────────────────────────────────────────────
@@ -38,7 +42,11 @@ async function login() {
     });
     if (data && data.access_token) {
         APP.token = data.access_token;
+        APP.username = user;
+        APP.password = pass;
         localStorage.setItem('bot_token', APP.token);
+        localStorage.setItem('bot_user', user);
+        localStorage.setItem('bot_pass', pass);
         document.getElementById('login-modal').style.display = 'none';
         initDashboard();
     } else {
@@ -50,7 +58,11 @@ async function login() {
 
 function logout() {
     APP.token = null;
+    APP.username = null;
+    APP.password = null;
     localStorage.removeItem('bot_token');
+    localStorage.removeItem('bot_user');
+    localStorage.removeItem('bot_pass');
     document.getElementById('login-modal').style.display = 'flex';
     if (APP.refreshInterval) clearInterval(APP.refreshInterval);
     if (APP.ws) APP.ws.close();
@@ -89,11 +101,75 @@ function switchPanel(panelName) {
 }
 
 function onPanelSwitch(panel) {
+    if (panel === 'overview') loadActivityFeed();
     if (panel === 'trading') loadTrades();
     if (panel === 'performance') loadPerformance();
     if (panel === 'risk') loadRiskData();
     if (panel === 'logs') loadLogs();
     if (panel === 'config') loadConfig();
+    if (panel === 'grid') {
+        if (APP.selectedSymbol === 'Overview' && APP.activeSymbolsCache.length > 0) {
+            // Auto switch to first symbol if entering grid from overview
+            switchSymbol(APP.activeSymbolsCache[0]);
+        }
+        loadGrid();
+    }
+}
+
+// ── Symbol Selection ─────────────────────────────────────────
+function renderSymbolTabs(symbols, botState = 'running') {
+    if (!symbols || !Array.isArray(symbols)) return;
+    APP.activeSymbolsCache = symbols;
+
+    const container = document.getElementById('symbol-tabs-container');
+    if (!container) return;
+
+    let html = `<div class="symbol-tab ${APP.selectedSymbol === 'Overview' ? 'active' : ''}" data-symbol="Overview">Overview</div>`;
+
+    symbols.forEach(sym => {
+        const isActive = APP.selectedSymbol === sym;
+        // In the future we can map specific symbol states, for now we mirror global state
+        const dotClass = botState === 'running' ? 'active' : botState;
+        html += `
+            <div class="symbol-tab ${isActive ? 'active' : ''}" data-symbol="${sym}">
+                ${sym} <span class="symbol-status-dot ${dotClass}"></span>
+            </div>
+        `;
+    });
+
+    container.innerHTML = html;
+
+    // Attach listeners
+    container.querySelectorAll('.symbol-tab').forEach(tab => {
+        tab.addEventListener('click', () => {
+            const sym = tab.dataset.symbol;
+            switchSymbol(sym);
+        });
+    });
+}
+
+function switchSymbol(symbol) {
+    if (APP.selectedSymbol === symbol) return;
+    APP.selectedSymbol = symbol;
+
+    // Update active class on tabs
+    document.querySelectorAll('.symbol-tab').forEach(t => {
+        t.classList.toggle('active', t.dataset.symbol === symbol);
+    });
+
+    // If we are currently on the trading panel, just reload the trades/chart
+    if (APP.currentPanel === 'trading') {
+        loadTrades();
+        return;
+    }
+
+    // If "Overview", switch to Overview panel, else switch to Grid panel to show the DOM
+    if (symbol === 'Overview') {
+        switchPanel('overview');
+    } else {
+        if (APP.currentPanel !== 'grid') switchPanel('grid');
+        else loadGrid(); // force refresh
+    }
 }
 
 // ── Buttons ──────────────────────────────────────────────────
@@ -110,6 +186,10 @@ function setupButtons() {
     document.getElementById('btn-export-csv').addEventListener('click', exportCSV);
     document.getElementById('btn-save-config').addEventListener('click', saveConfig);
     document.getElementById('btn-refresh-logs').addEventListener('click', loadLogs);
+
+    // Auth
+    const btnLogout = document.getElementById('btn-logout');
+    if (btnLogout) btnLogout.addEventListener('click', logout);
 }
 
 function setupSliders() {
@@ -131,6 +211,9 @@ async function refreshData() {
     if (!data) return;
     updateStatus(data);
     updateKPIs(data);
+    if (APP.currentPanel === 'overview') {
+        loadActivityFeed();
+    }
 }
 
 function updateStatus(data) {
@@ -150,48 +233,56 @@ function updateStatus(data) {
     if (modeBadge) modeBadge.textContent = data.testnet ? 'TESTNET' : '🔴 MAINNET';
     const latency = document.getElementById('latency-badge');
     if (latency) latency.textContent = (data.exchange_latency_ms || '--') + 'ms';
+
+    // Update Symbol Tabs
+    if (data.active_symbols) {
+        renderSymbolTabs(data.active_symbols, status);
+    }
+
+    // Update Portfolio Health Bar
+    const healthText = document.getElementById('health-bar-text');
+    if (healthText) {
+        const activeCount = data.active_symbols ? data.active_symbols.length : 0;
+        const dailyPnl = data.pnl?.daily || 0;
+        const sign = dailyPnl >= 0 ? '+' : '';
+        const pnlStr = `$${dailyPnl.toFixed(2)}`;
+
+        if (status === 'running') {
+            healthText.innerHTML = `— ${activeCount} pares operando — Beneficio Hoy: <span style="color:${dailyPnl >= 0 ? 'var(--green)' : 'var(--red)'}">${sign}${pnlStr}</span>`;
+        } else {
+            healthText.innerHTML = `— Bot ${status === 'paused' ? 'Pausado' : 'Detenido'}`;
+        }
+    }
 }
 
 function updateKPIs(data) {
     const pnl = data.pnl || {};
     const capital = data.capital || {};
-    const risk = data.risk || {};
 
     setText('kpi-capital', `$${(capital.current || 0).toFixed(2)}`);
-    const changePct = capital.change_pct || 0;
-    const changeEl = document.getElementById('kpi-capital-change');
-    if (changeEl) {
-        changeEl.textContent = `${changePct >= 0 ? '+' : ''}${changePct.toFixed(2)}%`;
-        changeEl.className = `kpi-change ${changePct >= 0 ? 'up' : 'down'}`;
-    }
 
-    setPnlText('kpi-pnl-24h', pnl['24h'] || 0);
+    setPnlText('kpi-pnl-24h', pnl.daily || 0);
     setPnlText('kpi-pnl-total', pnl.total || 0);
-    setText('kpi-drawdown', `${(risk.drawdown_pct || 0).toFixed(2)}%`);
+    setText('kpi-drawdown', `${(data.drawdown_pct || 0).toFixed(2)}%`);
 
     const ddBar = document.getElementById('drawdown-bar');
     if (ddBar) {
-        const ddPct = risk.drawdown_pct || 0;
-        const ddLimit = risk.drawdown_limit_pct || 15;
+        const ddPct = data.drawdown_pct || 0;
+        const ddLimit = 15;
         ddBar.style.width = `${Math.min(100, (ddPct / ddLimit) * 100)}%`;
         ddBar.className = 'progress-fill ' + (ddPct > ddLimit * 0.7 ? 'progress-danger' : ddPct > ddLimit * 0.4 ? 'progress-warning' : 'progress-safe');
     }
 
-    // Quick risk
-    setText('risk-dd-quick', `${(risk.drawdown_pct || 0).toFixed(1)}%`);
-    setText('risk-daily-quick', `${(risk.daily_loss_pct || 0).toFixed(2)}%`);
+    setText('kpi-trades-today', data.total_trades || 0);
 
-    // Price badge
-    if (data.last_trade) {
-        const price = document.getElementById('price-badge');
-        if (price) price.textContent = `BTC: $${(data.last_trade.price || 0).toLocaleString(undefined, { maximumFractionDigits: 2 })}`;
-    }
+    // Render Per-Pair Mini Cards
+    renderMiniCards(data);
 }
 
 // ── WebSocket ────────────────────────────────────────────────
 function connectWebSocket() {
     const protocol = location.protocol === 'https:' ? 'wss' : 'ws';
-    const wsUrl = `${protocol}://${location.host}/ws`;
+    const wsUrl = `${protocol}://${location.host}/ws?username=${encodeURIComponent(APP.username || '')}&password=${encodeURIComponent(APP.password || '')}`;
     APP.ws = new WebSocket(wsUrl);
 
     APP.ws.onopen = () => {
@@ -229,8 +320,10 @@ function handleWSMessage(msg) {
         case 'trade':
             if (APP.currentPanel === 'trading') loadTrades();
             break;
-        case 'grid':
-            if (APP.currentPanel === 'grid') updateGridPanel(msg.data);
+        case 'overview':
+            if (msg.data && APP.currentPanel === 'grid') {
+                updateGridPanel(msg.data);
+            }
             break;
     }
 }
@@ -247,6 +340,16 @@ function initCharts() {
             lineColor: '#3b82f6',
             lineWidth: 2,
         });
+
+        new ResizeObserver(() => {
+            if (eqContainer.clientWidth > 0) {
+                chart.applyOptions({
+                    width: eqContainer.clientWidth,
+                    height: eqContainer.clientHeight || 400
+                });
+            }
+        }).observe(eqContainer);
+
         loadEquityChart();
     }
 
@@ -259,6 +362,15 @@ function initCharts() {
             borderUpColor: '#00c087', borderDownColor: '#ef4444',
             wickUpColor: '#00c087', wickDownColor: '#ef4444',
         });
+
+        new ResizeObserver(() => {
+            if (priceContainer.clientWidth > 0) {
+                chart.applyOptions({
+                    width: priceContainer.clientWidth,
+                    height: priceContainer.clientHeight || 400
+                });
+            }
+        }).observe(priceContainer);
     }
 }
 
@@ -299,12 +411,38 @@ async function loadEquityChart(days = 30) {
 
 // ── Panel Loaders ────────────────────────────────────────────
 async function loadTrades() {
-    const data = await api('/trading/trades?limit=50');
-    if (!data || !data.trades) return;
+    // Update chart title dynamically immediately
+    const chartTitleContainer = document.querySelector('#panel-trading .card-header .card-title');
+    if (chartTitleContainer) {
+        chartTitleContainer.textContent = `📈 ${APP.selectedSymbol} Price Chart`;
+    }
+
+    // Load price chart
+    const klinesParams = APP.selectedSymbol !== 'Overview' ? `&symbol=${APP.selectedSymbol}` : '';
+    const klines = await api(`/trading/klines?interval=60&limit=200${klinesParams}`);
+    if (APP.charts.price) {
+        if (klines && klines.klines && klines.klines.length > 0) {
+            const series = klines.klines.map(k => {
+                const timeVal = (typeof k.timestamp === 'string' ? new Date(k.timestamp).getTime() : k.timestamp) / 1000;
+                return {
+                    time: timeVal,
+                    open: k.open, high: k.high, low: k.low, close: k.close,
+                };
+            });
+            APP.charts.price.setData(series);
+        } else {
+            console.log(`[Chart] No klines returned for ${APP.selectedSymbol}`);
+            APP.charts.price.setData([]);
+        }
+    }
+
+    // Load recent trades
+    const symParam = APP.selectedSymbol !== 'Overview' ? `&symbol=${APP.selectedSymbol}` : '';
+    const data = await api(`/trading/trades?limit=50${symParam}`);
     const tbody = document.getElementById('trades-table-body');
     if (!tbody) return;
 
-    if (data.trades.length === 0) {
+    if (!data || !data.trades || data.trades.length === 0) {
         tbody.innerHTML = '<tr><td colspan="6" style="text-align:center;color:var(--text-muted);">Sin trades</td></tr>';
         return;
     }
@@ -312,34 +450,24 @@ async function loadTrades() {
     tbody.innerHTML = data.trades.map(t => `
     <tr>
       <td>${new Date(t.timestamp).toLocaleString()}</td>
-      <td><span class="tag tag-${t.side.toLowerCase()}">${t.side}</span></td>
+      <td><span class="tag tag-${t.side.toLowerCase()}">${t.side === 'Buy' || t.side === 'BUY' ? 'Compra 🟢' : 'Venta 🔴'}</span></td>
       <td>$${t.price.toLocaleString(undefined, { maximumFractionDigits: 2 })}</td>
-      <td>${t.quantity.toFixed(6)}</td>
+      <td>${t.qty.toFixed(6)}</td>
       <td>$${t.fee.toFixed(4)}</td>
       <td style="color:${t.pnl >= 0 ? 'var(--green)' : 'var(--red)'};">${t.pnl >= 0 ? '+' : ''}${t.pnl.toFixed(4)}</td>
     </tr>
   `).join('');
-
-    // Load price chart
-    const klines = await api('/trading/klines?interval=60&limit=200');
-    if (klines && klines.klines && APP.charts.price) {
-        const series = klines.klines.map(k => ({
-            time: k.timestamp / 1000,
-            open: k.open, high: k.high, low: k.low, close: k.close,
-        }));
-        APP.charts.price.setData(series);
-    }
 }
 
 async function loadPerformance(period = '7d') {
     const data = await api(`/performance/metrics?period=${period}`);
     if (!data) return;
     setText('perf-total-trades', data.total_trades || 0);
-    setPnlText('perf-net-pnl', data.net_pnl || 0);
+    setPnlText('perf-net-pnl', data.pnl_total || 0);
     setText('perf-win-rate', `${(data.win_rate || 0).toFixed(1)}%`);
     setText('perf-profit-factor', (data.profit_factor || 0).toFixed(2));
     setText('perf-sharpe', (data.sharpe_ratio || 0).toFixed(2));
-    setText('perf-max-dd', `${(data.max_drawdown_pct || 0).toFixed(2)}%`);
+    setText('perf-max-dd', `${(data.drawdown_pct || 0).toFixed(2)}%`);
 }
 
 async function loadRiskData() {
@@ -351,6 +479,29 @@ async function loadRiskData() {
     setText('risk-daily-limit', `${data.daily_loss_limit_pct || 1}%`);
     updateProgressBar('risk-dd-bar', data.drawdown_pct, data.drawdown_limit_pct);
     updateProgressBar('risk-daily-bar', data.daily_loss_pct, data.daily_loss_limit_pct);
+
+    // Mocking price move 1h logic gracefully falling back to 0 if not present
+    const priceMove1h = data.price_move_1h || 0;
+    const priceMoveLimit = data.price_move_limit_pct || 8;
+    setText('risk-price-move', `${priceMove1h.toFixed(2)}%`);
+    setText('risk-price-limit', `${priceMoveLimit}%`);
+    updateProgressBar('risk-price-bar', priceMove1h, priceMoveLimit);
+
+    // 4.2 Alert Center & Emergency Banners
+    const alertsContainer = document.getElementById('risk-alerts-container');
+    if (alertsContainer) {
+        let alertsHtml = '';
+        if (data.drawdown_pct > (data.drawdown_limit_pct * 0.8)) {
+            alertsHtml += `<div style="background:rgba(239, 68, 68, 0.1); border:1px solid var(--red); color:var(--red); padding:12px; border-radius:6px; font-weight:600;">⚠️ ALERTA: Drawdown cerca del límite preventivo. Sistema listo para pausar.</div>`;
+        }
+        if (data.daily_loss_pct > (data.daily_loss_limit_pct * 0.8)) {
+            alertsHtml += `<div style="background:rgba(239, 68, 68, 0.1); border:1px solid var(--red); color:var(--red); padding:12px; border-radius:6px; font-weight:600;">⚠️ ALERTA: Pérdida diaria cerca del máximo admitido (Circuit Breaker).</div>`;
+        }
+        if (alertsHtml === '') {
+            alertsHtml = `<div style="background:rgba(0, 192, 135, 0.1); border:1px solid var(--green); color:var(--green); padding:12px; border-radius:6px; font-weight:600;">✅ Sistema Estable: El bot está gestionando el riesgo automáticamente.</div>`;
+        }
+        alertsContainer.innerHTML = alertsHtml;
+    }
 
     const cbData = await api('/logs/circuit-breakers?limit=20');
     if (cbData && cbData.events) {
@@ -494,32 +645,167 @@ async function exportCSV() {
 }
 
 // ── Grid Panel ───────────────────────────────────────────────
+async function loadGrid() {
+    const data = await api('/dashboard/status');
+    if (data && data.grid_levels) {
+        updateGridPanel(data);
+    } else {
+        updateGridPanel(null);
+    }
+}
+
 function updateGridPanel(data) {
     if (!data) return;
-    setText('grid-center', data.center_price ? `$${data.center_price.toLocaleString()}` : '--');
-    setText('grid-spacing', data.spacing_pct ? `${(data.spacing_pct * 100).toFixed(2)}%` : '--');
-    setText('grid-levels-count', data.num_levels || '--');
-    setText('grid-active-orders', data.pending_orders || '--');
 
-    const container = document.getElementById('grid-levels-container');
+    // Filter levels by Selected Symbol
+    const allLevels = data.grid_levels || [];
+    const levels = allLevels.filter(l => l.symbol === APP.selectedSymbol);
+
+    const sells = levels.filter(l => l.side === 'Sell' || l.side === 'SELL').reverse();
+    const buys = levels.filter(l => l.side === 'Buy' || l.side === 'BUY');
+
+    setText('grid-levels-count', (sells.length + buys.length) || '--');
+    setText('grid-active-orders', levels.filter(l => l.status === 'pending').length || '--');
+
+    // Populate grid spacing if available
+    let spacingStr = '--';
+    if (data.grid_states && data.grid_states.length > 0) {
+        const state = data.grid_states.find(s => s.symbol === APP.selectedSymbol) || data.grid_states[0];
+        if (state && state.spacing_pct !== undefined) {
+            spacingStr = `${(state.spacing_pct * 100).toFixed(2)}%`;
+        }
+    }
+    setText('grid-spacing', spacingStr);
+
+    // Populate indicators if available
+    let targetSymbol = APP.selectedSymbol;
+    if (targetSymbol === 'Overview' && data.active_symbols && data.active_symbols.length > 0) {
+        targetSymbol = data.active_symbols[0]; // fallback so it doesn't break
+    }
+
+    let currentPrice = 0;
+    if (data.latest_indicators && targetSymbol) {
+        const inds = data.latest_indicators[targetSymbol];
+        if (inds) {
+            currentPrice = inds.current_price || 0;
+            setText('grid-center', `$${inds.current_price ? inds.current_price.toLocaleString() : '--'}`);
+
+            // 3.2 Translated Stats
+            const adx = inds.adx || 0;
+            const atrPct = (inds.atr_pct || 0) * 100;
+            const trend = inds.trend; // 'long', 'short', 'neutral'
+
+            let volatilityStr = 'baja';
+            if (atrPct > 4) volatilityStr = 'extrema';
+            else if (atrPct > 2) volatilityStr = 'alta';
+            else if (atrPct > 1) volatilityStr = 'moderada';
+
+            let forceStr = 'Débil';
+            if (adx > 40) forceStr = 'Muy Fuerte';
+            else if (adx > 25) forceStr = 'Fuerte';
+
+            let trendStr = 'Neutral';
+            let trendColor = 'var(--text-muted)';
+            if (trend === 'long') { trendStr = 'Alcista'; trendColor = 'var(--green)'; }
+            else if (trend === 'short') { trendStr = 'Bajista'; trendColor = 'var(--red)'; }
+
+            const translatedTrendEl = document.getElementById('translated-trend');
+            if (translatedTrendEl) {
+                translatedTrendEl.textContent = `${trendStr} (${forceStr})`;
+                translatedTrendEl.style.color = trendColor;
+                translatedTrendEl.style.borderColor = trendColor;
+            }
+
+            const summaryEl = document.getElementById('translated-summary');
+            if (summaryEl) {
+                summaryEl.innerHTML = `El mercado está operando con una tendencia <strong style="color:${trendColor}">${trendStr.toLowerCase()}</strong> y una fuerza <strong>${forceStr.toLowerCase()}</strong>. La volatilidad actual es <strong>${volatilityStr}</strong> (ATR ${atrPct.toFixed(2)}%).`;
+                summaryEl.style.borderLeftColor = trendColor;
+            }
+        }
+    }
+
+    // 3.1 Visual DOM Ladder
+    const container = document.getElementById('dom-ladder-container');
     if (!container) return;
 
-    const sells = (data.sell_levels || []).reverse();
-    const buys = data.buy_levels || [];
-
     if (!sells.length && !buys.length) {
-        container.innerHTML = '<div style="text-align:center;color:var(--text-muted);padding:40px;">Sin grid activo</div>';
+        container.innerHTML = '<div style="text-align:center;color:var(--text-muted);padding:40px;">Sin grid activo para este par</div>';
         return;
     }
 
     let html = '';
+
+    // Calculate max qty for progress bar scaling
+    const maxQty = Math.max(...levels.map(l => parseFloat(l.qty) || 0));
+
     sells.forEach(l => {
-        html += `<div class="grid-level sell"><span>SELL Lv${l.level || '?'}</span><span>$${l.price?.toLocaleString() || '--'}</span><span>${l.qty?.toFixed(6) || '--'}</span></div>`;
+        const price = parseFloat(l.price) || 0;
+        const qty = parseFloat(l.qty) || 0;
+        const fillPct = maxQty > 0 ? (qty / maxQty) * 100 : 0;
+        const distanceStr = currentPrice > 0 ? `a ${((price - currentPrice) / currentPrice * 100).toFixed(2)}%` : '';
+
+        html += `
+        <div style="position:relative; display:flex; justify-content:space-between; padding:8px 12px; margin-bottom:2px; background:rgba(239, 68, 68, 0.05); border-radius:4px; overflow:hidden;">
+            <div style="position:absolute; top:0; right:0; bottom:0; width:${fillPct}%; background:rgba(239, 68, 68, 0.15); z-index:0;"></div>
+            <div style="position:relative; z-index:1; display:flex; flex-direction:column; gap:2px;">
+                <span style="font-weight:700; color:var(--red);">Venta en $${price.toLocaleString()}</span>
+                <span style="font-size:0.75rem; color:var(--text-muted);">${distanceStr} (Nivel ${l.level_id || '?'})</span>
+            </div>
+            <div style="position:relative; z-index:1; font-weight:600; font-family:var(--font-mono);">
+                ${qty.toFixed(6)}
+            </div>
+        </div>`;
     });
-    html += `<div class="grid-level" style="background:var(--blue-dim);border-left:3px solid var(--blue);font-weight:700;"><span>─── CENTRO ───</span><span>$${data.center_price?.toLocaleString() || '--'}</span></div>`;
+
+    html += `
+    <div style="display:flex; justify-content:center; align-items:center; padding:12px 0; margin:4px 0; border-top:1px dashed rgba(255,255,255,0.1); border-bottom:1px dashed rgba(255,255,255,0.1);">
+        <span style="background:var(--blue-dim); color:var(--blue); padding:4px 12px; border-radius:12px; font-weight:700; font-size:0.85rem;">
+            PRECIO ACTUAL: $${currentPrice.toLocaleString(undefined, { maximumFractionDigits: 2 })}
+        </span>
+    </div>`;
+
     buys.forEach(l => {
-        html += `<div class="grid-level buy"><span>BUY Lv${l.level || '?'}</span><span>$${l.price?.toLocaleString() || '--'}</span><span>${l.qty?.toFixed(6) || '--'}</span></div>`;
+        const price = parseFloat(l.price) || 0;
+        const qty = parseFloat(l.qty) || 0;
+        const fillPct = maxQty > 0 ? (qty / maxQty) * 100 : 0;
+        const distanceStr = currentPrice > 0 ? `a ${((currentPrice - price) / currentPrice * 100).toFixed(2)}%` : '';
+
+        html += `
+        <div style="position:relative; display:flex; justify-content:space-between; padding:8px 12px; margin-bottom:2px; background:rgba(0, 192, 135, 0.05); border-radius:4px; overflow:hidden;">
+            <div style="position:absolute; top:0; left:0; bottom:0; width:${fillPct}%; background:rgba(0, 192, 135, 0.15); z-index:0;"></div>
+            <div style="position:relative; z-index:1; display:flex; flex-direction:column; gap:2px;">
+                <span style="font-weight:700; color:var(--green);">Compra en $${price.toLocaleString()}</span>
+                <span style="font-size:0.75rem; color:var(--text-muted);">${distanceStr} (Nivel ${l.level_id || '?'})</span>
+            </div>
+            <div style="position:relative; z-index:1; font-weight:600; font-family:var(--font-mono);">
+                ${qty.toFixed(6)}
+            </div>
+        </div>`;
     });
+
+    container.innerHTML = html;
+}
+
+function renderSymbolTabs(symbols, status) {
+    const container = document.getElementById('symbol-tabs-container');
+    if (!container || !symbols || !symbols.length) return;
+
+    let html = '';
+    // Always add the Overview tab first
+    const overviewActive = APP.selectedSymbol === 'Overview' ? 'active' : '';
+    html += `<div class="symbol-tab ${overviewActive}" data-symbol="Overview" onclick="switchSymbol('Overview')">Overview</div>`;
+
+    // Add a tab for each active symbol
+    symbols.forEach(sym => {
+        const isActive = APP.selectedSymbol === sym ? 'active' : '';
+        const ledClass = status === 'running' ? 'status-led running' : 'status-led ' + status;
+        html += `
+        <div class="symbol-tab ${isActive}" data-symbol="${sym}" onclick="switchSymbol('${sym}')">
+            ${sym}
+            <div class="${ledClass}" style="width:6px;height:6px;display:inline-block;margin-left:6px;box-shadow:none;"></div>
+        </div>`;
+    });
+
     container.innerHTML = html;
 }
 
@@ -532,7 +818,7 @@ function setText(id, text) {
 function setPnlText(id, value) {
     const el = document.getElementById(id);
     if (!el) return;
-    el.textContent = `${value >= 0 ? '+' : ''}$${value.toFixed(4)}`;
+    el.textContent = `${value >= 0 ? '+' : ''}$${value.toFixed(2)}`;
     el.className = el.className.replace(/positive|negative/g, '').trim() + ` ${value >= 0 ? 'positive' : 'negative'}`;
 }
 
@@ -554,6 +840,65 @@ function updateProgressBar(id, value, limit) {
     bar.className = 'progress-fill ' + (pct > 70 ? 'progress-danger' : pct > 40 ? 'progress-warning' : 'progress-safe');
 }
 
+// ── New UX Redesign Features ──────────────────────────────────
+function renderMiniCards(data) {
+    const container = document.getElementById('mini-cards-container');
+    if (!container || !data.active_symbols) return;
+
+    let html = '';
+    data.active_symbols.forEach(sym => {
+        const inds = (data.latest_indicators || {})[sym] || {};
+        const priceStr = inds.current_price ? `$${inds.current_price.toLocaleString(undefined, { maximumFractionDigits: 2 })}` : '--';
+        const trend = inds.trend === 'long' ? 'alcista' : (inds.trend === 'short' ? 'bajista' : 'neutral');
+        const color = inds.trend === 'long' ? 'var(--green)' : (inds.trend === 'short' ? 'var(--red)' : 'var(--text-muted)');
+
+        html += `
+        <div class="kpi-card" style="flex:1; min-width:180px; display:flex; flex-direction:column; gap:8px;">
+            <div style="display:flex; justify-content:space-between; align-items:center;">
+                <span style="font-weight:700; font-size:1rem;">${sym}</span>
+                <span style="font-size:0.7rem; color:${color}; background:rgba(255,255,255,0.05); padding:2px 6px; border-radius:4px; text-transform:uppercase;">${trend}</span>
+            </div>
+            <div style="display:flex; justify-content:space-between; font-size:0.8rem; color:var(--text-secondary);">
+                <span>Precio: ${priceStr}</span>
+                <span>ADX: ${inds.adx ? inds.adx.toFixed(1) : '--'}</span>
+            </div>
+        </div>
+        `;
+    });
+    container.innerHTML = html;
+}
+
+async function loadActivityFeed() {
+    const data = await api('/trading/trades?limit=15');
+    const container = document.getElementById('activity-feed-container');
+    if (!container || !data || !data.trades) return;
+
+    if (data.trades.length === 0) {
+        container.innerHTML = '<div style="text-align:center;color:var(--text-muted);padding:20px;">Sin actividad reciente</div>';
+        return;
+    }
+
+    container.innerHTML = data.trades.map(t => {
+        const timeStr = new Date(t.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+        const sideStr = t.side === 'BUY' || t.side === 'Buy' ? 'Compró' : 'Vendió';
+        const emoji = t.side === 'BUY' || t.side === 'Buy' ? '🟢' : '🔴';
+        const pnlStr = t.pnl ? ` — ${t.pnl >= 0 ? 'ganó' : 'perdió'} <span style="color:${t.pnl >= 0 ? 'var(--green)' : 'var(--red)'}">$${Math.abs(t.pnl).toFixed(2)}</span>` : '';
+
+        return `
+        <div style="padding:10px 14px; background:var(--bg-surface); border-radius:8px; border:1px solid rgba(255,255,255,0.02); display:flex; align-items:center; gap:12px;">
+            <span style="font-size:1.1rem; filter:grayscale(0.5);">${emoji}</span>
+            <div style="flex:1; display:flex; flex-direction:column; gap:2px;">
+                <span style="font-size:0.75rem; color:var(--text-muted);">${timeStr}</span>
+                <span style="font-size:0.9rem;">
+                    ${sideStr} <strong>${t.qty.toFixed(6)} ${t.symbol || 'BTC'}</strong> a $${t.price.toLocaleString(undefined, { maximumFractionDigits: 2 })}
+                    ${pnlStr}
+                </span>
+            </div>
+        </div>
+        `;
+    }).join('');
+}
+
 // ── Boot ─────────────────────────────────────────────────────
 document.addEventListener('DOMContentLoaded', () => {
     // Basic setup needed for login screen
@@ -567,6 +912,8 @@ document.addEventListener('DOMContentLoaded', () => {
         // Validate token
         api('/auth/me').then(data => {
             if (data && data.username) {
+                APP.username = localStorage.getItem('bot_user');
+                APP.password = localStorage.getItem('bot_pass');
                 document.getElementById('login-modal').style.display = 'none';
                 initDashboard();
             } else {

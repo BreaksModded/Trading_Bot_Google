@@ -1,525 +1,566 @@
 <!DOCTYPE html>
 <html lang="es">
+
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>Trading Bot Dashboard — Grid Dinámico ATR/ADX</title>
-  <meta name="description" content="Professional algorithmic trading bot dashboard with real-time monitoring and control">
+  <meta name="description"
+    content="Professional algorithmic trading bot dashboard with real-time monitoring and control">
   <link rel="stylesheet" href="/css/styles.css">
-  <script src="https://cdn.jsdelivr.net/npm/lightweight-charts@4.1.0/dist/lightweight-charts.standalone.production.js"></script>
+  <script
+    src="https://cdn.jsdelivr.net/npm/lightweight-charts@4.1.0/dist/lightweight-charts.standalone.production.js"></script>
 </head>
+
 <body>
-<div class="app-layout">
+  <div class="app-layout">
 
-  <!-- ═══ Sidebar ═══ -->
-  <aside class="sidebar" id="sidebar">
-    <div class="sidebar-logo">
-      <span style="font-size:1.6rem">🤖</span>
-      <div>
-        <h1>GridBot</h1>
-        <span class="version">v1.0</span>
-      </div>
-    </div>
-
-    <nav class="sidebar-nav">
-      <div class="nav-item active" data-panel="overview">
-        <span class="icon">📊</span> Overview
-      </div>
-      <div class="nav-item" data-panel="trading">
-        <span class="icon">📈</span> Trading
-      </div>
-      <div class="nav-item" data-panel="grid">
-        <span class="icon">🔲</span> Grid
-      </div>
-      <div class="nav-item" data-panel="performance">
-        <span class="icon">💰</span> Rendimiento
-      </div>
-      <div class="nav-item" data-panel="risk">
-        <span class="icon">🛡️</span> Riesgo
-      </div>
-      <div class="nav-item" data-panel="backtest">
-        <span class="icon">🧪</span> Backtest
-      </div>
-      <div class="nav-item" data-panel="config">
-        <span class="icon">⚙️</span> Configuración
-      </div>
-      <div class="nav-item" data-panel="logs">
-        <span class="icon">📝</span> Logs
-      </div>
-    </nav>
-
-    <div class="sidebar-footer">
-      <div style="display:flex; align-items:center; gap:8px; margin-bottom:8px;">
-        <span class="status-led running" id="sidebar-led"></span>
-        <span id="sidebar-status" style="font-size:0.75rem; color:var(--text-secondary);">Conectando...</span>
-      </div>
-      <div style="font-size:0.7rem; color:var(--text-muted);" id="sidebar-uptime">Uptime: --</div>
-    </div>
-  </aside>
-
-  <!-- ═══ Main Content ═══ -->
-  <main class="main-content">
-
-    <!-- Header -->
-    <header class="header">
-      <div class="header-left">
-        <button class="btn btn-sm" id="sidebar-toggle" style="display:none;">☰</button>
-        <div class="header-status">
-          <span class="status-led running" id="header-led"></span>
-          <span class="status-text" id="header-status">Conectando</span>
+    <!-- ═══ Sidebar ═══ -->
+    <aside class="sidebar" id="sidebar">
+      <div class="sidebar-logo">
+        <span style="font-size:1.6rem">🤖</span>
+        <div>
+          <h1>GridBot</h1>
+          <span class="version">v1.0</span>
         </div>
-        <span class="connection-badge">
-          <span id="mode-badge">TESTNET</span>
-          <span>|</span>
-          <span id="latency-badge">--ms</span>
-        </span>
-        <span class="connection-badge" id="price-badge" style="font-weight:700; color: var(--green);">
-          BTC: $--
-        </span>
       </div>
-      <div class="header-controls">
-        <button class="btn btn-start btn-sm" id="btn-start">▶ Start</button>
-        <button class="btn btn-pause btn-sm" id="btn-pause">⏸ Pause</button>
-        <button class="btn btn-stop btn-sm" id="btn-stop">⏹ Stop</button>
-        <button class="btn btn-emergency btn-sm" id="btn-emergency">⚠ Emergency</button>
+
+      <nav class="sidebar-nav">
+        <div class="nav-item active" data-panel="overview">
+          <span class="icon">📊</span> Overview
+        </div>
+        <div class="nav-item" data-panel="trading">
+          <span class="icon">📈</span> Trading
+        </div>
+        <div class="nav-item" data-panel="grid">
+          <span class="icon">🔲</span> Grid
+        </div>
+        <div class="nav-item" data-panel="performance">
+          <span class="icon">💰</span> Rendimiento
+        </div>
+        <div class="nav-item" data-panel="risk">
+          <span class="icon">🛡️</span> Riesgo
+        </div>
+        <div class="nav-item" data-panel="backtest">
+          <span class="icon">🧪</span> Backtest
+        </div>
+        <div class="nav-item" data-panel="config">
+          <span class="icon">⚙️</span> Configuración
+        </div>
+        <div class="nav-item" data-panel="logs">
+          <span class="icon">📝</span> Logs
+        </div>
+        <div class="nav-item" id="btn-logout" style="margin-top:auto;color:var(--red);">
+          <span class="icon">🚪</span> Salir
+        </div>
+      </nav>
+
+      <div class="sidebar-footer">
+        <div style="display:flex; align-items:center; gap:8px; margin-bottom:8px;">
+          <span class="status-led running" id="sidebar-led"></span>
+          <span id="sidebar-status" style="font-size:0.75rem; color:var(--text-secondary);">Conectando...</span>
+        </div>
+        <div style="font-size:0.7rem; color:var(--text-muted);" id="sidebar-uptime">Uptime: --</div>
       </div>
-    </header>
+    </aside>
 
-    <div class="page-content">
+    <!-- ═══ Main Content ═══ -->
+    <main class="main-content">
 
-      <!-- ═══ 1. OVERVIEW PANEL ═══ -->
-      <div class="panel active" id="panel-overview">
-        <div class="kpi-grid">
-          <div class="kpi-card">
-            <div class="kpi-icon">💰</div>
-            <div class="kpi-label">Capital Total</div>
-            <div class="kpi-value" id="kpi-capital">$--</div>
-            <div class="kpi-change up" id="kpi-capital-change">+0%</div>
+      <!-- Header -->
+      <header class="header">
+        <div class="header-left">
+          <button class="btn btn-sm" id="sidebar-toggle" style="display:none;">☰</button>
+          <div class="header-status">
+            <span class="status-led running" id="header-led"></span>
+            <span class="status-text" id="header-status">Conectando</span>
+            <span id="health-bar-text"
+              style="margin-left:8px; font-weight: 500; font-size: 0.85rem; color: var(--text-secondary);">
+              — Calculando portfolio...
+            </span>
           </div>
-          <div class="kpi-card">
-            <div class="kpi-icon">📈</div>
-            <div class="kpi-label">PnL 24h</div>
-            <div class="kpi-value positive" id="kpi-pnl-24h">+$0.00</div>
+          <span class="connection-badge">
+            <span id="mode-badge">TESTNET</span>
+            <span>|</span>
+            <span id="latency-badge">--ms</span>
+          </span>
+        </div>
+        <div class="header-controls">
+          <button class="btn btn-start btn-sm" id="btn-start">▶ Start</button>
+          <button class="btn btn-pause btn-sm" id="btn-pause">⏸ Pause</button>
+          <button class="btn btn-stop btn-sm" id="btn-stop">⏹ Stop</button>
+          <button class="btn btn-emergency btn-sm" id="btn-emergency">⚠ Emergency</button>
+        </div>
+      </header>
+
+      <!-- ═══ Symbol Selector ═══ -->
+      <div class="symbol-selector" id="symbol-tabs-container">
+        <div class="symbol-tab active" data-symbol="Overview">Overview</div>
+        <!-- Dynamic tabs injected by app.js -->
+      </div>
+
+      <div class="page-content">
+
+        <!-- ═══ 1. OVERVIEW PANEL ═══ -->
+        <div class="panel active" id="panel-overview">
+          <div class="kpi-grid">
+            <div class="kpi-card">
+              <div class="kpi-icon">💼</div>
+              <div class="kpi-label">Capital Trabajando</div>
+              <div class="kpi-value" id="kpi-capital">$--</div>
+              <div class="card-subtitle">Tu balance activo en el bot</div>
+            </div>
+            <div class="kpi-card">
+              <div class="kpi-icon">🌟</div>
+              <div class="kpi-label">Ganancia Total</div>
+              <div class="kpi-value positive" id="kpi-pnl-total">+$0.00</div>
+              <div class="card-subtitle">Beneficios históricos</div>
+            </div>
+            <div class="kpi-card">
+              <div class="kpi-icon">💸</div>
+              <div class="kpi-label">Ganancia de Hoy</div>
+              <div class="kpi-value positive" id="kpi-pnl-24h">+$0.00</div>
+              <div class="card-subtitle">Beneficios en las últimas 24h</div>
+            </div>
+            <div class="kpi-card">
+              <div class="kpi-icon">🛡️</div>
+              <div class="kpi-label">Riesgo / Caída Máxima</div>
+              <div class="kpi-value" id="kpi-drawdown">0.0%</div>
+              <div class="progress-bar">
+                <div class="progress-fill progress-safe" id="drawdown-bar" style="width:0;"></div>
+              </div>
+            </div>
           </div>
-          <div class="kpi-card">
-            <div class="kpi-icon">📊</div>
-            <div class="kpi-label">PnL Total</div>
-            <div class="kpi-value positive" id="kpi-pnl-total">+$0.00</div>
+
+          <!-- 2.3 Per-Pair Mini Cards -->
+          <div id="mini-cards-container" class="stats-grid" style="margin-bottom:var(--space-md);">
+            <!-- Dynamic mini cards injected via app.js -->
           </div>
-          <div class="kpi-card">
-            <div class="kpi-icon">📉</div>
-            <div class="kpi-label">Drawdown</div>
-            <div class="kpi-value" id="kpi-drawdown">0.0%</div>
-            <div class="progress-bar"><div class="progress-fill progress-safe" id="drawdown-bar" style="width:0;"></div></div>
-          </div>
-          <div class="kpi-card">
-            <div class="kpi-icon">🔄</div>
-            <div class="kpi-label">Trades Hoy</div>
-            <div class="kpi-value" id="kpi-trades-today">0</div>
-          </div>
-          <div class="kpi-card">
-            <div class="kpi-icon">🔲</div>
-            <div class="kpi-label">Grid Status</div>
-            <div class="kpi-value" id="kpi-grid-status" style="font-size:1.2rem;">ACTIVO</div>
+
+          <div class="two-col">
+            <div class="chart-container">
+              <div class="card-header">
+                <span class="card-title">📈 Evolución del Capital</span>
+                <div class="period-selector">
+                  <button class="period-btn active" data-period="7d">7D</button>
+                  <button class="period-btn" data-period="30d">30D</button>
+                  <button class="period-btn" data-period="90d">90D</button>
+                </div>
+              </div>
+              <div class="chart-wrapper" id="equity-chart"></div>
+            </div>
+
+            <!-- 2.4 Plain-Language Activity Feed -->
+            <div class="card" style="display: flex; flex-direction: column;">
+              <div class="card-header"><span class="card-title">📋 Actividad Reciente</span></div>
+              <div id="activity-feed-container"
+                style="flex:1; overflow-y:auto; max-height:450px; display:flex; flex-direction:column; gap:6px; font-size:0.8rem; color:var(--text-secondary);">
+                <div style="text-align:center; padding:20px;">Esperando actividad...</div>
+              </div>
+            </div>
           </div>
         </div>
 
-        <div class="two-col">
+        <!-- ═══ 2. TRADING PANEL ═══ -->
+        <div class="panel" id="panel-trading">
           <div class="chart-container">
             <div class="card-header">
-              <span class="card-title">📈 Equity Curve</span>
+              <span class="card-title">📈 BTC/USDT Price Chart</span>
               <div class="period-selector">
-                <button class="period-btn active" data-period="7d">7D</button>
-                <button class="period-btn" data-period="30d">30D</button>
-                <button class="period-btn" data-period="90d">90D</button>
+                <button class="period-btn" data-interval="1">1M</button>
+                <button class="period-btn" data-interval="5">5M</button>
+                <button class="period-btn" data-interval="15">15M</button>
+                <button class="period-btn active" data-interval="60">1H</button>
+                <button class="period-btn" data-interval="240">4H</button>
               </div>
             </div>
-            <div class="chart-wrapper" id="equity-chart"></div>
+            <div class="chart-wrapper" id="price-chart"></div>
           </div>
-          <div>
-            <div class="card" style="margin-bottom:var(--space-md);">
-              <div class="card-header"><span class="card-title">📋 Último Trade</span></div>
-              <div id="last-trade-info">
-                <div class="stat-item">
-                  <span class="stat-label">Lado</span>
-                  <span class="stat-value tag tag-buy" id="lt-side">--</span>
-                </div>
-                <div class="stat-item" style="margin-top:4px;">
-                  <span class="stat-label">Precio</span>
-                  <span class="stat-value" id="lt-price">--</span>
-                </div>
-                <div class="stat-item" style="margin-top:4px;">
-                  <span class="stat-label">Cantidad</span>
-                  <span class="stat-value" id="lt-qty">--</span>
-                </div>
-                <div class="stat-item" style="margin-top:4px;">
-                  <span class="stat-label">PnL</span>
-                  <span class="stat-value positive" id="lt-pnl">--</span>
-                </div>
+
+          <div class="card" style="margin-top:var(--space-md);">
+            <div class="card-header">
+              <span class="card-title">📋 Historial de Trades</span>
+              <div style="display:flex;gap:8px;">
+                <button class="btn btn-sm btn-primary" id="btn-export-csv">↓ Exportar CSV</button>
               </div>
             </div>
-            <div class="card">
-              <div class="card-header"><span class="card-title">🛡️ Riesgo Rápido</span></div>
-              <div>
-                <div class="stat-item">
-                  <span class="stat-label">Drawdown</span>
-                  <span class="stat-value" id="risk-dd-quick">0%</span>
-                </div>
-                <div class="stat-item" style="margin-top:4px;">
-                  <span class="stat-label">Pérdida Diaria</span>
-                  <span class="stat-value" id="risk-daily-quick">0%</span>
-                </div>
-                <div class="stat-item" style="margin-top:4px;">
-                  <span class="stat-label">ADX</span>
-                  <span class="stat-value" id="risk-adx-quick">--</span>
-                </div>
-              </div>
+            <div style="max-height:400px; overflow-y:auto;">
+              <table class="data-table">
+                <thead>
+                  <tr>
+                    <th>Fecha</th>
+                    <th>Lado</th>
+                    <th>Precio</th>
+                    <th>Cantidad</th>
+                    <th>Fee</th>
+                    <th>PnL</th>
+                  </tr>
+                </thead>
+                <tbody id="trades-table-body">
+                  <tr>
+                    <td colspan="6" style="text-align:center;color:var(--text-muted)">Cargando trades...</td>
+                  </tr>
+                </tbody>
+              </table>
             </div>
           </div>
         </div>
-      </div>
 
-      <!-- ═══ 2. TRADING PANEL ═══ -->
-      <div class="panel" id="panel-trading">
-        <div class="chart-container">
-          <div class="card-header">
-            <span class="card-title">📈 BTC/USDT Price Chart</span>
-            <div class="period-selector">
-              <button class="period-btn" data-interval="1">1M</button>
-              <button class="period-btn" data-interval="5">5M</button>
-              <button class="period-btn" data-interval="15">15M</button>
-              <button class="period-btn active" data-interval="60">1H</button>
-              <button class="period-btn" data-interval="240">4H</button>
-            </div>
-          </div>
-          <div class="chart-wrapper" id="price-chart"></div>
-        </div>
-
-        <div class="card" style="margin-top:var(--space-md);">
-          <div class="card-header">
-            <span class="card-title">📋 Historial de Trades</span>
-            <div style="display:flex;gap:8px;">
-              <button class="btn btn-sm btn-primary" id="btn-export-csv">↓ Exportar CSV</button>
-            </div>
-          </div>
-          <div style="max-height:400px; overflow-y:auto;">
-            <table class="data-table">
-              <thead>
-                <tr>
-                  <th>Fecha</th>
-                  <th>Lado</th>
-                  <th>Precio</th>
-                  <th>Cantidad</th>
-                  <th>Fee</th>
-                  <th>PnL</th>
-                </tr>
-              </thead>
-              <tbody id="trades-table-body">
-                <tr><td colspan="6" style="text-align:center;color:var(--text-muted)">Cargando trades...</td></tr>
-              </tbody>
-            </table>
-          </div>
-        </div>
-      </div>
-
-      <!-- ═══ 3. GRID PANEL ═══ -->
-      <div class="panel" id="panel-grid">
-        <div class="two-col">
-          <div>
-            <div class="card">
+        <!-- ═══ 3. GRID PANEL (DOM) ═══ -->
+        <div class="panel" id="panel-grid">
+          <div class="two-col">
+            <!-- Left: DOM Ladder -->
+            <div class="card" style="display:flex; flex-direction:column; min-height: 500px;">
               <div class="card-header">
-                <span class="card-title">🔲 Niveles del Grid</span>
+                <span class="card-title">🔲 Libro de Órdenes (Grid)</span>
                 <span class="tag tag-buy" id="grid-active-tag">Activo</span>
               </div>
-              <div class="grid-levels" id="grid-levels-container">
-                <div style="text-align:center;color:var(--text-muted);padding:40px">Sin grid activo</div>
+              <div id="dom-ladder-container"
+                style="flex:1; display:flex; flex-direction:column; gap:6px; overflow-y:auto; padding-right:8px; margin-top:8px;">
+                <div style="text-align:center;color:var(--text-muted);padding:40px">Cargando libro de órdenes...</div>
               </div>
             </div>
-          </div>
-          <div>
-            <div class="card" style="margin-bottom:var(--space-md);">
-              <div class="card-header"><span class="card-title">📐 Info Grid</span></div>
-              <div class="stat-item"><span class="stat-label">Centro</span><span class="stat-value" id="grid-center">--</span></div>
-              <div class="stat-item" style="margin-top:4px;"><span class="stat-label">Spacing</span><span class="stat-value" id="grid-spacing">--</span></div>
-              <div class="stat-item" style="margin-top:4px;"><span class="stat-label">Niveles</span><span class="stat-value" id="grid-levels-count">--</span></div>
-              <div class="stat-item" style="margin-top:4px;"><span class="stat-label">Órdenes Activas</span><span class="stat-value" id="grid-active-orders">--</span></div>
-            </div>
-            <div class="card">
-              <div class="card-header"><span class="card-title">📊 Indicadores</span></div>
-              <div class="stat-item"><span class="stat-label">ATR</span><span class="stat-value" id="ind-atr">--</span></div>
-              <div class="stat-item" style="margin-top:4px;"><span class="stat-label">ATR%</span><span class="stat-value" id="ind-atr-pct">--</span></div>
-              <div class="stat-item" style="margin-top:4px;"><span class="stat-label">ADX</span><span class="stat-value" id="ind-adx">--</span></div>
-              <div class="stat-item" style="margin-top:4px;"><span class="stat-label">EMA50</span><span class="stat-value" id="ind-ema-fast">--</span></div>
-              <div class="stat-item" style="margin-top:4px;"><span class="stat-label">EMA200</span><span class="stat-value" id="ind-ema-slow">--</span></div>
-              <div class="stat-item" style="margin-top:4px;"><span class="stat-label">Tendencia</span><span class="stat-value" id="ind-trend">--</span></div>
-            </div>
-          </div>
-        </div>
-      </div>
 
-      <!-- ═══ 4. PERFORMANCE PANEL ═══ -->
-      <div class="panel" id="panel-performance">
-        <div class="kpi-grid">
-          <div class="kpi-card">
-            <div class="kpi-label">Total Trades</div>
-            <div class="kpi-value" id="perf-total-trades">0</div>
-          </div>
-          <div class="kpi-card">
-            <div class="kpi-label">Win Rate</div>
-            <div class="kpi-value positive" id="perf-win-rate">0%</div>
-          </div>
-          <div class="kpi-card">
-            <div class="kpi-label">Profit Factor</div>
-            <div class="kpi-value" id="perf-profit-factor">0</div>
-          </div>
-          <div class="kpi-card">
-            <div class="kpi-label">Sharpe Ratio</div>
-            <div class="kpi-value" id="perf-sharpe">0</div>
-          </div>
-          <div class="kpi-card">
-            <div class="kpi-label">Net PnL</div>
-            <div class="kpi-value positive" id="perf-net-pnl">$0.00</div>
-          </div>
-          <div class="kpi-card">
-            <div class="kpi-label">Max Drawdown</div>
-            <div class="kpi-value" id="perf-max-dd">0%</div>
-          </div>
-        </div>
-
-        <div class="two-col">
-          <div class="chart-container">
-            <div class="card-header">
-              <span class="card-title">📊 PnL Diario</span>
-            </div>
-            <div class="chart-wrapper small" id="daily-pnl-chart"></div>
-          </div>
-          <div class="chart-container">
-            <div class="card-header"><span class="card-title">📈 Equity Curve</span></div>
-            <div class="chart-wrapper small" id="perf-equity-chart"></div>
-          </div>
-        </div>
-
-        <div class="card" style="margin-top:var(--space-md);">
-          <div class="card-header">
-            <span class="card-title">📋 Métricas Detalladas</span>
-            <div class="period-selector" id="perf-period-selector">
-              <button class="period-btn" data-period="24h">24H</button>
-              <button class="period-btn active" data-period="7d">7D</button>
-              <button class="period-btn" data-period="30d">30D</button>
-              <button class="period-btn" data-period="all">Todo</button>
-            </div>
-          </div>
-          <div class="stats-grid" id="perf-detailed-stats"></div>
-        </div>
-      </div>
-
-      <!-- ═══ 5. RISK PANEL ═══ -->
-      <div class="panel" id="panel-risk">
-        <div class="three-col">
-          <div class="card">
-            <div class="card-header"><span class="card-title">📉 Drawdown</span></div>
-            <div class="kpi-value" id="risk-drawdown">0.00%</div>
-            <div class="kpi-label" style="margin-top:var(--space-sm);">Límite: <span id="risk-dd-limit">15%</span></div>
-            <div class="progress-bar" style="margin-top:var(--space-md);">
-              <div class="progress-fill progress-safe" id="risk-dd-bar" style="width:0;"></div>
-            </div>
-          </div>
-          <div class="card">
-            <div class="card-header"><span class="card-title">📅 Pérdida Diaria</span></div>
-            <div class="kpi-value" id="risk-daily-loss">0.00%</div>
-            <div class="kpi-label" style="margin-top:var(--space-sm);">Límite: <span id="risk-daily-limit">1%</span></div>
-            <div class="progress-bar" style="margin-top:var(--space-md);">
-              <div class="progress-fill progress-safe" id="risk-daily-bar" style="width:0;"></div>
-            </div>
-          </div>
-          <div class="card">
-            <div class="card-header"><span class="card-title">⚡ Movimiento Precio</span></div>
-            <div class="kpi-value" id="risk-price-move">0.00%</div>
-            <div class="kpi-label" style="margin-top:var(--space-sm);">Límite 1h: <span id="risk-price-limit">8%</span></div>
-            <div class="progress-bar" style="margin-top:var(--space-md);">
-              <div class="progress-fill progress-safe" id="risk-price-bar" style="width:0;"></div>
-            </div>
-          </div>
-        </div>
-
-        <div class="card" style="margin-top:var(--space-md);">
-          <div class="card-header"><span class="card-title">🚨 Historial Circuit Breakers</span></div>
-          <div style="max-height:300px; overflow-y:auto;">
-            <table class="data-table">
-              <thead>
-                <tr><th>Fecha</th><th>Tipo</th><th>Valor</th><th>Umbral</th><th>Acción</th></tr>
-              </thead>
-              <tbody id="cb-history-body">
-                <tr><td colspan="5" style="text-align:center;color:var(--text-muted)">Sin eventos</td></tr>
-              </tbody>
-            </table>
-          </div>
-        </div>
-      </div>
-
-      <!-- ═══ 6. BACKTEST PANEL ═══ -->
-      <div class="panel" id="panel-backtest">
-        <div class="two-col">
-          <div>
-            <div class="card">
-              <div class="card-header"><span class="card-title">🧪 Configurar Backtest</span></div>
-              <div class="form-group">
-                <label class="form-label">Meses de datos</label>
-                <input type="range" id="bt-months" min="1" max="24" value="6">
-                <span class="stat-value" id="bt-months-val" style="font-size:0.8rem;">6 meses</span>
+            <!-- Right: Translated Stats & Inventory -->
+            <div>
+              <div class="card" style="margin-bottom:var(--space-md);">
+                <div class="card-header"><span class="card-title">🤖 Visión del Bot</span></div>
+                <div class="stat-item">
+                  <span class="stat-label">Análisis de Mercado</span>
+                  <span class="stat-value tag" id="translated-trend">Calculando...</span>
+                </div>
+                <!-- Plain language summary -->
+                <div
+                  style="font-size:0.85rem; color:var(--text-secondary); margin-top:12px; line-height:1.5; padding:12px; background:rgba(0,0,0,0.2); border-radius:6px; border-left:3px solid var(--blue);"
+                  id="translated-summary">
+                  Recopilando datos de volatilidad y tendencia para este par...
+                </div>
               </div>
-              <div class="form-group">
-                <label class="form-label">Timeframe</label>
-                <select class="form-select" id="bt-timeframe">
-                  <option value="1h" selected>1 Hora</option>
-                  <option value="4h">4 Horas</option>
-                  <option value="15m">15 Minutos</option>
-                </select>
-              </div>
-              <div class="form-group">
-                <label class="form-label">Capital Inicial (USDT)</label>
-                <input type="number" class="form-input" id="bt-capital" value="150" min="10" max="10000">
-              </div>
-              <div class="form-group">
-                <label class="form-label">Niveles Grid</label>
-                <input type="range" id="bt-levels" min="2" max="10" value="5">
-                <span class="stat-value" id="bt-levels-val" style="font-size:0.8rem;">5</span>
-              </div>
-              <div class="form-group">
-                <label class="form-label">Walk-Forward Testing</label>
-                <label class="toggle"><input type="checkbox" id="bt-walkforward"><span class="toggle-slider"></span></label>
-              </div>
-              <button class="btn btn-primary" id="btn-run-backtest" style="width:100%;margin-top:var(--space-md);">🚀 Ejecutar Backtest</button>
-            </div>
-          </div>
-          <div>
-            <div class="card" id="bt-results-card">
-              <div class="card-header"><span class="card-title">📊 Resultados</span></div>
-              <div id="bt-results">
-                <div style="text-align:center;color:var(--text-muted);padding:60px 20px;">
-                  Configure y ejecute un backtest para ver resultados
+
+              <div class="card">
+                <div class="card-header"><span class="card-title">💼 Estado de la Red</span></div>
+                <div class="stat-item">
+                  <span class="stat-label">Total Órdenes en Red</span>
+                  <span class="stat-value" id="grid-levels-count">--</span>
+                </div>
+                <div class="stat-item" style="margin-top:8px;">
+                  <span class="stat-label">Esperando Ejecución</span>
+                  <span class="stat-value" id="grid-active-orders">--</span>
+                </div>
+                <div class="stat-item" style="margin-top:8px;">
+                  <span class="stat-label">Distancia entre niveles</span>
+                  <span class="stat-value" id="grid-spacing">--</span>
+                </div>
+                <div style="margin-top:16px; padding-top:16px; border-top:1px solid rgba(255,255,255,0.05);">
+                  <div class="stat-item">
+                    <span class="stat-label">Precio Pivote (Centro)</span>
+                    <span class="stat-value" id="grid-center">--</span>
+                  </div>
                 </div>
               </div>
             </div>
           </div>
         </div>
 
-        <div class="chart-container" id="bt-equity-container" style="margin-top:var(--space-md);display:none;">
-          <div class="card-header"><span class="card-title">📈 Equity Curve (Backtest)</span></div>
-          <div class="chart-wrapper" id="bt-equity-chart"></div>
-        </div>
-      </div>
+        <!-- ═══ 4. PERFORMANCE PANEL ═══ -->
+        <div class="panel" id="panel-performance">
+          <div class="kpi-grid">
+            <div class="kpi-card" title="Número total de operaciones cerradas.">
+              <div class="kpi-label">Operaciones (Trades)</div>
+              <div class="kpi-value" id="perf-total-trades">0</div>
+            </div>
+            <div class="kpi-card" title="Porcentaje de operaciones que han cerrado en ganancias.">
+              <div class="kpi-label">Porcentaje de Acierto</div>
+              <div class="kpi-value positive" id="perf-win-rate">0%</div>
+            </div>
+            <div class="kpi-card" title="Por cada $1 perdido, el bot gana esta cantidad. Mayor a 1.0 es rentable.">
+              <div class="kpi-label">Ratio de Beneficio (Profit Factor)</div>
+              <div class="kpi-value" id="perf-profit-factor">0</div>
+            </div>
+            <div class="kpi-card"
+              title="Mide el rendimiento frente al riesgo. Valores >1.0 son buenos, >2.0 excelentes.">
+              <div class="kpi-label">Calidad del Retorno (Sharpe)</div>
+              <div class="kpi-value" id="perf-sharpe">0</div>
+            </div>
+            <div class="kpi-card" title="Beneficio neto total generado (incluyendo pérdidas y comisiones).">
+              <div class="kpi-label">Beneficio Neto</div>
+              <div class="kpi-value positive" id="perf-net-pnl">$0.00</div>
+            </div>
+            <div class="kpi-card" title="La mayor caída de capital experimentada desde un punto máximo.">
+              <div class="kpi-label">Caída Máxima Histórica</div>
+              <div class="kpi-value" id="perf-max-dd">0%</div>
+            </div>
+          </div>
 
-      <!-- ═══ 7. CONFIG PANEL ═══ -->
-      <div class="panel" id="panel-config">
-        <div class="two-col">
-          <div>
-            <div class="card">
+          <div class="two-col">
+            <div class="chart-container">
               <div class="card-header">
-                <span class="card-title">⚙️ Parámetros del Grid</span>
-                <button class="btn btn-primary btn-sm" id="btn-save-config">💾 Guardar</button>
+                <span class="card-title" title="Beneficios y pérdidas generadas cada día individual">📊 PnL
+                  Diario</span>
               </div>
-              <div class="form-group">
-                <label class="form-label">Niveles del Grid</label>
-                <input type="range" id="cfg-levels" min="2" max="10" value="5">
-                <span class="stat-value" id="cfg-levels-val" style="font-size:0.8rem;">5</span>
-              </div>
-              <div class="form-group">
-                <label class="form-label">Spacing Mínimo (%)</label>
-                <input type="number" class="form-input" id="cfg-spacing" value="0.6" min="0.3" max="5" step="0.1">
-              </div>
-              <div class="form-group">
-                <label class="form-label">Multiplicador ATR</label>
-                <input type="number" class="form-input" id="cfg-atr-mult" value="1.5" min="0.5" max="5" step="0.1">
-              </div>
-              <div class="form-group">
-                <label class="form-label">Tamaño Orden (USDT)</label>
-                <input type="number" class="form-input" id="cfg-order-size" value="25" min="5" max="500" step="5">
-              </div>
-              <div class="form-group">
-                <label class="form-label">Umbral ADX</label>
-                <input type="number" class="form-input" id="cfg-adx-threshold" value="25" min="15" max="50">
-              </div>
-              <div class="form-group">
-                <label class="form-label">Max Drawdown (%)</label>
-                <input type="number" class="form-input" id="cfg-max-dd" value="15" min="5" max="50">
-              </div>
-              <div class="form-group">
-                <label class="form-label">Max Pérdida Diaria (%)</label>
-                <input type="number" class="form-input" id="cfg-max-daily" value="1" min="0.5" max="10" step="0.5">
-              </div>
+              <div class="chart-wrapper small" id="daily-pnl-chart"></div>
+            </div>
+            <div class="chart-container">
+              <div class="card-header"><span class="card-title"
+                  title="La evolución del valor total de tu cartera a lo largo del tiempo">📈 Evolución del Capital
+                  Neto</span></div>
+              <div class="chart-wrapper small" id="perf-equity-chart"></div>
             </div>
           </div>
-          <div>
-            <div class="card" style="margin-bottom:var(--space-md);">
-              <div class="card-header"><span class="card-title">👁️ Vista Previa Grid</span></div>
-              <div id="config-grid-preview">
-                <div style="text-align:center;color:var(--text-muted);padding:40px;">Ajuste parámetros para ver vista previa</div>
+
+          <div class="card" style="margin-top:var(--space-md);">
+            <div class="card-header">
+              <span class="card-title">📋 Métricas Detalladas</span>
+              <div class="period-selector" id="perf-period-selector">
+                <button class="period-btn" data-period="24h">24H</button>
+                <button class="period-btn active" data-period="7d">7D</button>
+                <button class="period-btn" data-period="30d">30D</button>
+                <button class="period-btn" data-period="all">Todo</button>
+              </div>
+            </div>
+            <div class="stats-grid" id="perf-detailed-stats"></div>
+          </div>
+        </div>
+
+        <!-- ═══ 5. RISK PANEL ═══ -->
+        <div class="panel" id="panel-risk">
+
+          <!-- 4.2 Alert Center & Emergency Banners -->
+          <div id="risk-alerts-container"
+            style="display:flex; flex-direction:column; gap:8px; margin-bottom:var(--space-md);">
+            <!-- Dynamically injected by app.js -->
+          </div>
+
+          <div class="three-col">
+            <div class="card">
+              <div class="card-header"><span class="card-title">📉 Nivel de Drawdown</span></div>
+              <div class="kpi-value" id="risk-drawdown">0.00%</div>
+              <div class="kpi-label" style="margin-top:var(--space-sm);">Límite de Seguridad: <span
+                  id="risk-dd-limit">15%</span>
+              </div>
+              <div class="progress-bar" style="margin-top:var(--space-md);">
+                <div class="progress-fill progress-safe" id="risk-dd-bar" style="width:0;"></div>
               </div>
             </div>
             <div class="card">
-              <div class="card-header"><span class="card-title">📜 Historial Cambios</span></div>
-              <div id="config-history" style="max-height:200px;overflow-y:auto;font-size:0.75rem;color:var(--text-muted);">
-                Cargando...
+              <div class="card-header"><span class="card-title">📅 Riesgo Diario</span></div>
+              <div class="kpi-value" id="risk-daily-loss">0.00%</div>
+              <div class="kpi-label" style="margin-top:var(--space-sm);">Límite Max: <span
+                  id="risk-daily-limit">1%</span>
+              </div>
+              <div class="progress-bar" style="margin-top:var(--space-md);">
+                <div class="progress-fill progress-safe" id="risk-daily-bar" style="width:0;"></div>
+              </div>
+            </div>
+            <div class="card">
+              <div class="card-header"><span class="card-title">⚡ Volatilidad Intradiaria (1h)</span></div>
+              <div class="kpi-value" id="risk-price-move">0.00%</div>
+              <div class="kpi-label" style="margin-top:var(--space-sm);">Freno Automático al: <span
+                  id="risk-price-limit">8%</span></div>
+              <div class="progress-bar" style="margin-top:var(--space-md);">
+                <div class="progress-fill progress-safe" id="risk-price-bar" style="width:0;"></div>
+              </div>
+            </div>
+          </div>
+
+          <div class="card" style="margin-top:var(--space-md);">
+            <div class="card-header"><span class="card-title">🚨 Historial Circuit Breakers</span></div>
+            <div style="max-height:300px; overflow-y:auto;">
+              <table class="data-table">
+                <thead>
+                  <tr>
+                    <th>Fecha</th>
+                    <th>Tipo</th>
+                    <th>Valor</th>
+                    <th>Umbral</th>
+                    <th>Acción</th>
+                  </tr>
+                </thead>
+                <tbody id="cb-history-body">
+                  <tr>
+                    <td colspan="5" style="text-align:center;color:var(--text-muted)">Sin eventos</td>
+                  </tr>
+                </tbody>
+              </table>
+            </div>
+          </div>
+        </div>
+
+        <!-- ═══ 6. BACKTEST PANEL ═══ -->
+        <div class="panel" id="panel-backtest">
+          <div class="two-col">
+            <div>
+              <div class="card">
+                <div class="card-header"><span class="card-title">🧪 Configurar Backtest</span></div>
+                <div class="form-group">
+                  <label class="form-label">Meses de datos</label>
+                  <input type="range" id="bt-months" min="1" max="24" value="6">
+                  <span class="stat-value" id="bt-months-val" style="font-size:0.8rem;">6 meses</span>
+                </div>
+                <div class="form-group">
+                  <label class="form-label">Timeframe</label>
+                  <select class="form-select" id="bt-timeframe">
+                    <option value="1h" selected>1 Hora</option>
+                    <option value="4h">4 Horas</option>
+                    <option value="15m">15 Minutos</option>
+                  </select>
+                </div>
+                <div class="form-group">
+                  <label class="form-label">Capital Inicial (USDT)</label>
+                  <input type="number" class="form-input" id="bt-capital" value="150" min="10" max="10000">
+                </div>
+                <div class="form-group">
+                  <label class="form-label">Niveles Grid</label>
+                  <input type="range" id="bt-levels" min="2" max="10" value="5">
+                  <span class="stat-value" id="bt-levels-val" style="font-size:0.8rem;">5</span>
+                </div>
+                <div class="form-group">
+                  <label class="form-label">Walk-Forward Testing</label>
+                  <label class="toggle"><input type="checkbox" id="bt-walkforward"><span
+                      class="toggle-slider"></span></label>
+                </div>
+                <button class="btn btn-primary" id="btn-run-backtest" style="width:100%;margin-top:var(--space-md);">🚀
+                  Ejecutar Backtest</button>
+              </div>
+            </div>
+            <div>
+              <div class="card" id="bt-results-card">
+                <div class="card-header"><span class="card-title">📊 Resultados</span></div>
+                <div id="bt-results">
+                  <div style="text-align:center;color:var(--text-muted);padding:60px 20px;">
+                    Configure y ejecute un backtest para ver resultados
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <div class="chart-container" id="bt-equity-container" style="margin-top:var(--space-md);display:none;">
+            <div class="card-header"><span class="card-title">📈 Equity Curve (Backtest)</span></div>
+            <div class="chart-wrapper" id="bt-equity-chart"></div>
+          </div>
+        </div>
+
+        <!-- ═══ 7. CONFIG PANEL ═══ -->
+        <div class="panel" id="panel-config">
+          <div class="two-col">
+            <div>
+              <div class="card">
+                <div class="card-header">
+                  <span class="card-title">⚙️ Parámetros del Grid</span>
+                  <button class="btn btn-primary btn-sm" id="btn-save-config">💾 Guardar</button>
+                </div>
+                <div class="form-group">
+                  <label class="form-label">Niveles del Grid</label>
+                  <input type="range" id="cfg-levels" min="2" max="10" value="5">
+                  <span class="stat-value" id="cfg-levels-val" style="font-size:0.8rem;">5</span>
+                </div>
+                <div class="form-group">
+                  <label class="form-label">Spacing Mínimo (%)</label>
+                  <input type="number" class="form-input" id="cfg-spacing" value="0.6" min="0.3" max="5" step="0.1">
+                </div>
+                <div class="form-group">
+                  <label class="form-label">Multiplicador ATR</label>
+                  <input type="number" class="form-input" id="cfg-atr-mult" value="1.5" min="0.5" max="5" step="0.1">
+                </div>
+                <div class="form-group">
+                  <label class="form-label">Tamaño Orden (USDT)</label>
+                  <input type="number" class="form-input" id="cfg-order-size" value="25" min="5" max="500" step="5">
+                </div>
+                <div class="form-group">
+                  <label class="form-label">Umbral ADX</label>
+                  <input type="number" class="form-input" id="cfg-adx-threshold" value="25" min="15" max="50">
+                </div>
+                <div class="form-group">
+                  <label class="form-label">Max Drawdown (%)</label>
+                  <input type="number" class="form-input" id="cfg-max-dd" value="15" min="5" max="50">
+                </div>
+                <div class="form-group">
+                  <label class="form-label">Max Pérdida Diaria (%)</label>
+                  <input type="number" class="form-input" id="cfg-max-daily" value="1" min="0.5" max="10" step="0.5">
+                </div>
+              </div>
+            </div>
+            <div>
+              <div class="card" style="margin-bottom:var(--space-md);">
+                <div class="card-header"><span class="card-title">👁️ Vista Previa Grid</span></div>
+                <div id="config-grid-preview">
+                  <div style="text-align:center;color:var(--text-muted);padding:40px;">Ajuste parámetros para ver vista
+                    previa</div>
+                </div>
+              </div>
+              <div class="card">
+                <div class="card-header"><span class="card-title">📜 Historial Cambios</span></div>
+                <div id="config-history"
+                  style="max-height:200px;overflow-y:auto;font-size:0.75rem;color:var(--text-muted);">
+                  Cargando...
+                </div>
               </div>
             </div>
           </div>
         </div>
-      </div>
 
-      <!-- ═══ 8. LOGS PANEL ═══ -->
-      <div class="panel" id="panel-logs">
-        <div class="card">
-          <div class="card-header">
-            <span class="card-title">📝 Event Logs</span>
-            <div style="display:flex; gap:8px; align-items:center;">
-              <select class="form-select" id="log-filter-level" style="width:120px;">
-                <option value="">Todos</option>
-                <option value="info">Info</option>
-                <option value="warning">Warning</option>
-                <option value="error">Error</option>
-                <option value="critical">Critical</option>
-              </select>
-              <input type="text" class="form-input" id="log-search" placeholder="Buscar..." style="width:200px;">
-              <button class="btn btn-sm btn-primary" id="btn-refresh-logs">↻ Actualizar</button>
+        <!-- ═══ 8. LOGS PANEL ═══ -->
+        <div class="panel" id="panel-logs">
+          <div class="card">
+            <div class="card-header">
+              <span class="card-title">📝 Event Logs</span>
+              <div style="display:flex; gap:8px; align-items:center;">
+                <select class="form-select" id="log-filter-level" style="width:120px;">
+                  <option value="">Todos</option>
+                  <option value="info">Info</option>
+                  <option value="warning">Warning</option>
+                  <option value="error">Error</option>
+                  <option value="critical">Critical</option>
+                </select>
+                <input type="text" class="form-input" id="log-search" placeholder="Buscar..." style="width:200px;">
+                <button class="btn btn-sm btn-primary" id="btn-refresh-logs">↻ Actualizar</button>
+              </div>
             </div>
-          </div>
-          <div class="log-terminal" id="log-terminal">
-            <div class="log-entry info">
-              <span class="timestamp">--:--:--</span>
-              <span class="level">INFO</span>
-              <span class="module">system</span>
-              Esperando conexión...
+            <div class="log-terminal" id="log-terminal">
+              <div class="log-entry info">
+                <span class="timestamp">--:--:--</span>
+                <span class="level">INFO</span>
+                <span class="module">system</span>
+                Esperando conexión...
+              </div>
             </div>
           </div>
         </div>
+
+      </div><!-- page-content -->
+    </main>
+  </div><!-- app-layout -->
+
+  <!-- ═══ Login Modal ═══ -->
+  <div id="login-modal"
+    style="position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(0,0,0,0.9);z-index:1000;display:flex;align-items:center;justify-content:center;">
+    <div class="card" style="width:380px;max-width:90vw;">
+      <div style="text-align:center;margin-bottom:var(--space-xl);">
+        <div style="font-size:3rem;margin-bottom:var(--space-md);">🤖</div>
+        <h2
+          style="font-size:1.3rem;font-weight:700;background:linear-gradient(135deg,var(--blue),var(--purple));background-clip:text;-webkit-background-clip:text;-webkit-text-fill-color:transparent;">
+          GridBot Dashboard</h2>
+        <p style="color:var(--text-muted);font-size:0.85rem;margin-top:4px;">Ingrese sus credenciales</p>
       </div>
-
-    </div><!-- page-content -->
-  </main>
-</div><!-- app-layout -->
-
-<!-- ═══ Login Modal ═══ -->
-<div id="login-modal" style="position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(0,0,0,0.9);z-index:1000;display:flex;align-items:center;justify-content:center;">
-  <div class="card" style="width:380px;max-width:90vw;">
-    <div style="text-align:center;margin-bottom:var(--space-xl);">
-      <div style="font-size:3rem;margin-bottom:var(--space-md);">🤖</div>
-      <h2 style="font-size:1.3rem;font-weight:700;background:linear-gradient(135deg,var(--blue),var(--purple));-webkit-background-clip:text;-webkit-text-fill-color:transparent;">GridBot Dashboard</h2>
-      <p style="color:var(--text-muted);font-size:0.85rem;margin-top:4px;">Ingrese sus credenciales</p>
+      <div class="form-group">
+        <label class="form-label">Usuario</label>
+        <input type="text" class="form-input" id="login-user" value="admin" autocomplete="username">
+      </div>
+      <div class="form-group">
+        <label class="form-label">Contraseña</label>
+        <input type="password" class="form-input" id="login-pass" placeholder="••••••••"
+          autocomplete="current-password">
+      </div>
+      <button class="btn btn-primary" id="btn-login" style="width:100%;padding:12px;font-size:0.9rem;">Iniciar
+        Sesión</button>
+      <div id="login-error"
+        style="color:var(--red);font-size:0.8rem;text-align:center;margin-top:var(--space-sm);display:none;">
+        Credenciales inválidas</div>
     </div>
-    <div class="form-group">
-      <label class="form-label">Usuario</label>
-      <input type="text" class="form-input" id="login-user" value="admin" autocomplete="username">
-    </div>
-    <div class="form-group">
-      <label class="form-label">Contraseña</label>
-      <input type="password" class="form-input" id="login-pass" placeholder="••••••••" autocomplete="current-password">
-    </div>
-    <button class="btn btn-primary" id="btn-login" style="width:100%;padding:12px;font-size:0.9rem;">Iniciar Sesión</button>
-    <div id="login-error" style="color:var(--red);font-size:0.8rem;text-align:center;margin-top:var(--space-sm);display:none;">Credenciales inválidas</div>
   </div>
-</div>
 
-<script src="/js/app.js"></script>
+  <script src="/js/app.js"></script>
 </body>
+
 </html>

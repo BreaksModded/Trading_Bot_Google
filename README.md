@@ -14,14 +14,15 @@
 
 | Módulo | Descripción |
 |--------|-------------|
-| **Grid Dinámico** | Spacing basado en ATR con filtros ADX/EMA — se adapta a la volatilidad |
+| **Grid Dinámico Asimétrico** | Spacing basado en ATR con filtros ADX/EMA y spacing asimétrico adaptativo |
+| **Interés Compuesto Dinámico**| Auto-reinversión de beneficios en el tamaño de las órdenes (Profit Reinvestment) |
 | **3 Circuit Breakers** | Max Drawdown (15%), Daily Loss (1%), Price Movement (8%/h) |
 | **Dashboard Web** | 8 paneles con dark-mode, charts en tiempo real, y control del bot |
 | **Backtesting** | Motor event-driven con fees reales, slippage, y walk-forward testing |
 | **Dead Man's Switch** | Proceso independiente que cancela órdenes si el bot se cae |
 | **Telegram** | Alertas de trades, circuit breakers, resumen diario |
 | **API REST** | FastAPI con JWT auth, WebSocket, y exportación CSV |
-| **112 Tests** | Cobertura de indicadores, riesgo, estrategia, DB, y API |
+| **112+ Tests** | Cobertura de indicadores, riesgo, estrategia, DB, y API |
 
 ---
 
@@ -100,6 +101,10 @@ TELEGRAM_CHAT_ID=tu_chat_id
 DASHBOARD_USERNAME=admin
 DASHBOARD_PASSWORD=tu_password_seguro
 JWT_SECRET_KEY=un_string_aleatorio_de_32_chars_minimo
+
+# Phase G: Advanced Features (opcional)
+GRID_ENABLE_PROFIT_REINVESTMENT=True
+GRID_ENABLE_ASYMMETRIC_GRID=True
 ```
 
 ### 3. Ejecutar en testnet
@@ -164,18 +169,37 @@ El dashboard web ofrece 8 paneles con diseño dark-mode profesional:
 | `num_levels` | 5 | Niveles por lado (buy + sell) |
 | `min_spacing_pct` | 0.6% | Separación mínima entre niveles |
 | `atr_multiplier` | 1.5 | Multiplica ATR% para spacing dinámico |
-| `order_size_usdt` | 25 | Tamaño de orden en USDT por nivel |
+| `order_size_usdt` | 25 | Tamaño de base en USDT por nivel |
 | `adx_threshold` | 25 | Pausa el grid si ADX > este valor |
 | `ema_fast/slow` | 50/200 | EMAs para detectar dirección del mercado |
 
-**Fórmula de spacing:** `max(min_spacing, ATR% × multiplier)`
+**Fórmula de spacing base:** `max(min_spacing, ATR% × multiplier)`
+
+### 🌟 Fase G: Interés Compuesto y Asimetría
+
+El motor incluye dos capacidades avanzadas de escalado dinámico:
+
+#### 1. Dynamic Profit Reinvestment (Interés Compuesto)
+
+En lugar de operar con un tamaño estático, el `ReinvestmentEngine` capitaliza las ganancias escalando automáticamente el `order_size_usdt` en función del *Equity* libre.
+
+- **Protección de Suelo (`reinvestment_min_baseline_floor_pct`)**: Evita que el bot reduzca su tamaño operativo por debajo de un umbral en mercados bajistas severos.
+- **Cap de Crecimiento (`reinvestment_max_step_growth_pct`)**: Suaviza picos explosivos limitando el escalado abrupto por ciclo.
+
+#### 2. Asymmetric Grid Bias
+
+Con `GRID_ENABLE_ASYMMETRIC_GRID=True`, el bot desvincula el spacing de compras y ventas calculando la asimetría basada en la fuerza de la tendencia local (ADX).
+
+- **En mercado bajista (Trend=SHORT)**: Expande el *Buy Spacing* para atrapar caídas profundas sin saturarse, y aprieta el *Sell Spacing* para huir rápido en el rebote.
+- **En mercado alcista (Trend=LONG)**: Aprieta el *Buy Spacing* comprando caídas cortas, y expande el *Sell Spacing* dejando correr las ganancias.
+*(Consulta el `TUNING_GUIDE.md` incluido para ejemplos de configuración avanzada).*
 
 ### Filtros de mercado
 
 - **ADX < 25** → Mercado en rango → Grid ACTIVO ✅
 - **ADX ≥ 25** → Tendencia fuerte → Grid PAUSADO ⏸️
-- **EMA 50 > 200** → Sesgo alcista (más niveles buy)
-- **EMA 50 < 200** → Sesgo bajista (más niveles sell)
+- **EMA 50 > 200** → Sesgo alcista (aplica Asimetría Bullish)
+- **EMA 50 < 200** → Sesgo bajista (aplica Asimetría Bearish)
 
 ---
 
@@ -202,6 +226,7 @@ curl -X POST http://localhost:8000/api/backtest/run \
 ```
 
 **Criterios de aceptación:**
+
 - PnL neto > 0
 - Max drawdown < 15%
 - Sharpe ratio > 1.0

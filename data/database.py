@@ -6,10 +6,13 @@ import csv
 import json
 import sqlite3
 import threading
+import queue
 from contextlib import contextmanager
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Iterator
+
+from loguru import logger
 
 from data.models import (
     CircuitBreakerEvent,
@@ -30,6 +33,57 @@ class Database:
         self._db_path.parent.mkdir(parents=True, exist_ok=True)
         self._local = threading.local()
         self._lock = threading.Lock()
+
+        self._write_queue = queue.Queue()
+        self._write_thread = threading.Thread(
+            target=self._background_writer,
+            daemon=True,
+            name="db-write-worker"
+        )
+        self._write_thread.start()
+
+    def _background_writer(self) -> None:
+        """Dedicated thread that consumes the write queue."""
+        while True:
+            try:
+                payload = self._write_queue.get(timeout=5.0)
+                if payload is None:  # sentinel for graceful shutdown
+                    self._write_queue.task_done()
+                    break
+                operation, args, kwargs = payload
+                try:
+                    operation(*args, **kwargs)
+                except Exception as op_err:
+                    logger.error(f"[DB Writer] Operation error: {op_err}", exc_info=True)
+                finally:
+                    self._write_queue.task_done()
+            except queue.Empty:
+                self._check_writer_health()
+            except Exception as e:
+                logger.error(
+                    f"[DB Writer] Unhandled error in background writer: {e}",
+                    exc_info=True
+                )
+
+    def _check_writer_health(self) -> None:
+        qsize = self._write_queue.qsize()
+        if qsize > 500:
+            logger.critical(
+                f"[DB Writer] Write queue critically overloaded: {qsize} pending items. "
+                f"Possible writer thread stall."
+            )
+        elif qsize > 100:
+            logger.warning(f"[DB Writer] Write queue backlog growing: {qsize} items pending.")
+
+    def is_writer_alive(self) -> bool:
+        return self._write_thread.is_alive()
+
+    def stop_writer(self) -> None:
+        """Gracefully shutdown background writer."""
+        self._write_queue.put(None)
+        self._write_thread.join(timeout=10.0)
+        if self._write_thread.is_alive():
+            logger.warning("[DB Writer] Worker thread failed to join within timeout.")
 
     @contextmanager
     def _cursor(self) -> Iterator[sqlite3.Cursor]:
@@ -198,7 +252,7 @@ class Database:
 
     # ── Trades ────────────────────────────────────────────────────────
 
-    def insert_trade(self, trade: TradeRecord) -> int:
+    def _sync_insert_trade(self, trade: TradeRecord) -> int:
         with self._cursor() as cur:
             cur.execute(
                 """INSERT INTO trades
@@ -221,21 +275,42 @@ class Database:
             )
             return cur.lastrowid or 0
 
-    def get_recent_trades(self, limit: int = 100, offset: int = 0) -> list[dict[str, Any]]:
+    def insert_trade(self, trade: TradeRecord) -> int:
+        if not self.is_writer_alive():
+            logger.critical("[DB Writer] Write thread dead, falling back to sync insert_trade.")
+            return self._sync_insert_trade(trade)
+            
+        self._write_queue.put((self._sync_insert_trade, (trade,), {}))
+        return 0
+
+    def get_recent_trades(self, limit: int = 100, offset: int = 0, symbol: str | None = None) -> list[dict[str, Any]]:
         with self._cursor() as cur:
-            cur.execute(
-                "SELECT * FROM trades ORDER BY timestamp DESC LIMIT ? OFFSET ?",
-                (limit, offset),
-            )
+            if symbol:
+                cur.execute(
+                    "SELECT * FROM trades WHERE symbol = ? ORDER BY timestamp DESC LIMIT ? OFFSET ?",
+                    (symbol, limit, offset),
+                )
+            else:
+                cur.execute(
+                    "SELECT * FROM trades ORDER BY timestamp DESC LIMIT ? OFFSET ?",
+                    (limit, offset),
+                )
             return [dict(row) for row in cur.fetchall()]
 
-    def get_trade_count(self, since: datetime | None = None) -> int:
+    def get_trade_count(self, since: datetime | None = None, symbol: str | None = None) -> int:
         with self._cursor() as cur:
+            clauses = []
+            params = []
             if since:
-                cur.execute(
-                    "SELECT COUNT(*) FROM trades WHERE timestamp >= ?",
-                    (since.isoformat(),),
-                )
+                clauses.append("timestamp >= ?")
+                params.append(since.isoformat())
+            if symbol:
+                clauses.append("symbol = ?")
+                params.append(symbol)
+                
+            if clauses:
+                where_sql = " WHERE " + " AND ".join(clauses)
+                cur.execute(f"SELECT COUNT(*) FROM trades{where_sql}", tuple(params))
             else:
                 cur.execute("SELECT COUNT(*) FROM trades")
             return cur.fetchone()[0]
@@ -501,7 +576,7 @@ class Database:
 
     # ── Event Logs ────────────────────────────────────────────────────
 
-    def log_event(self, event: EventLogRecord) -> None:
+    def _sync_log_event(self, event: EventLogRecord) -> None:
         with self._cursor() as cur:
             cur.execute(
                 """INSERT INTO event_logs
@@ -515,6 +590,11 @@ class Database:
                     json.dumps(event.payload, default=str),
                 ),
             )
+
+    def log_event(self, event: EventLogRecord) -> None:
+        # In-memory queue. A SIGKILL or OOM kill can lose queued-but-not-written records.
+        # This is acceptable for log_event entries.
+        self._write_queue.put((self._sync_log_event, (event,), {}))
 
     def get_logs(
         self,

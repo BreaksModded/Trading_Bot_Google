@@ -28,6 +28,13 @@ class StrategyConfig:
     enable_adx_filter: bool = True
     enable_ema_filter: bool = True
     min_volume_ratio: float = 1.0
+    # Phase G: Asymmetric Grid Bias
+    enable_asymmetric_grid: bool = False
+    asymmetric_bearish_buy_factor: float = 1.35
+    asymmetric_bearish_sell_factor: float = 0.70
+    asymmetric_bullish_buy_factor: float = 0.80
+    asymmetric_bullish_sell_factor: float = 1.25
+    asymmetric_min_profit_multiple: float = 1.15
 
 
 @dataclass(slots=True)
@@ -44,8 +51,49 @@ class StrategySignal:
     pause_new_grid: bool
     target_notional: float
     levels: list[GridLevel]
-    reason: str
-    close_history: pd.Series | None = None
+    reason: str = ""
+    close_history: list[float] | None = None
+    ema_fast_val: float = 0.0
+    ema_slow_val: float = 0.0
+    buy_spacing_pct: float = 0.0
+    sell_spacing_pct: float = 0.0
+
+    def scale(self, scale_factor: float) -> StrategySignal:
+        """Return a new signal instance with proportionally scaled quantities and notional."""
+        from copy import deepcopy
+        levels_copy = [deepcopy(lvl) for lvl in self.levels]
+        for lvl in levels_copy:
+            lvl.qty = lvl.qty * scale_factor
+        return StrategySignal(
+            generated_at=self.generated_at,
+            current_price=self.current_price,
+            spacing_pct=self.spacing_pct,
+            trend_bias=self.trend_bias,
+            adx_value=self.adx_value,
+            atr_pct=self.atr_pct,
+            volume_ratio=self.volume_ratio,
+            pause_new_grid=self.pause_new_grid,
+            target_notional=self.target_notional * scale_factor,
+            levels=levels_copy,
+            reason=self.reason,
+            close_history=self.close_history,
+            ema_fast_val=self.ema_fast_val,
+            ema_slow_val=self.ema_slow_val,
+            buy_spacing_pct=self.buy_spacing_pct,
+            sell_spacing_pct=self.sell_spacing_pct,
+        )
+
+    @property
+    def level_count(self) -> int:
+        return len(self.levels)
+    
+    @property
+    def grid_spread_pct(self) -> float:
+        """Returns the percentage spread between lowest and highest limit orders."""
+        if len(self.levels) < 2:
+            return 0.0
+        prices = [lvl.price for lvl in self.levels]
+        return (max(prices) - min(prices)) / self.current_price
 
 
 class GridStrategy:
@@ -73,6 +121,69 @@ class GridStrategy:
         """Compute current spacing using max(min_spacing, atr_multiplier * ATR%)."""
         return max(self.config.min_spacing_pct, self.config.atr_multiplier * atr_pct)
 
+    def compute_asymmetric_spacing(
+        self,
+        base_spacing_pct: float,
+        trend_bias: TrendBias,
+        adx_value: float,
+    ) -> tuple[float, float]:
+        """
+        Applies asymmetric scaling to the base ATR spacing based on trend.
+        
+        Returns: (buy_spacing_pct, sell_spacing_pct)
+        """
+        if not self.config.enable_asymmetric_grid:
+            return base_spacing_pct, base_spacing_pct
+            
+        if trend_bias == TrendBias.NEUTRAL:
+            return base_spacing_pct, base_spacing_pct
+            
+        # Scale strength linearly from ADX 15 (0%) to ADX 40 (100%)
+        adx_strength = max(0.0, min(1.0, (adx_value - 15.0) / 25.0))
+        if adx_strength == 0.0:
+            return base_spacing_pct, base_spacing_pct
+            
+        if trend_bias == TrendBias.SHORT:
+            cf_buy = self.config.asymmetric_bearish_buy_factor
+            cf_sell = self.config.asymmetric_bearish_sell_factor
+        else: # TrendBias.LONG
+            cf_buy = self.config.asymmetric_bullish_buy_factor
+            cf_sell = self.config.asymmetric_bullish_sell_factor
+            
+        buy_factor = 1.0 + (cf_buy - 1.0) * adx_strength
+        sell_factor = 1.0 + (cf_sell - 1.0) * adx_strength
+        
+        buy_spacing = base_spacing_pct * buy_factor
+        sell_spacing = base_spacing_pct * sell_factor
+        
+        # Minimum profitability guard (Taker fee isolated to 0.1% hardcoded for safety)
+        taker_fee = 0.001
+        min_spacing_allowed = (2 * taker_fee) * self.config.asymmetric_min_profit_multiple
+        
+        if sell_spacing < min_spacing_allowed:
+            from loguru import logger
+            logger.debug(
+                "[AsymmetricGuard] {} Sell spacing {:.3f}% clamped to minimum {:.3f}%",
+                self.config.symbol,
+                sell_spacing * 100,
+                min_spacing_allowed * 100
+            )
+            sell_spacing = min_spacing_allowed
+            
+        from loguru import logger
+        logger.info(
+            "[AsymmetricGrid] {} | Bias: {} | ADX: {:.1f} | "
+            "Buy spacing: {:.2f}% (base: {:.2f}% × {:.2f}) | "
+            "Sell spacing: {:.2f}% (base: {:.2f}% × {:.2f}) | "
+            "ADX strength: {:.2f}",
+            self.config.symbol, trend_bias.name, adx_value,
+            buy_spacing * 100, base_spacing_pct * 100, buy_factor,
+            sell_spacing * 100, base_spacing_pct * 100, sell_factor,
+            adx_strength
+        )
+            
+        return buy_spacing, sell_spacing
+
     def determine_trend(self, ema_fast_value: float, ema_slow_value: float) -> TrendBias:
         """Determine directional bias from EMA fast/slow relationship."""
         if not self.config.enable_ema_filter:
@@ -84,15 +195,15 @@ class GridStrategy:
         return TrendBias.NEUTRAL
 
     def _build_levels(
-        self, current_price: float, spacing_pct: float, trend: TrendBias, target_size: float
+        self, current_price: float, buy_spacing_pct: float, sell_spacing_pct: float, trend: TrendBias, target_size: float
     ) -> list[GridLevel]:
         """Create limit orders around spot depending on trend filter."""
         levels: list[GridLevel] = []
         qty = target_size / current_price
 
         for idx in range(1, self.config.num_levels + 1):
-            lower_price = current_price * (1 - spacing_pct * idx)
-            upper_price = current_price * (1 + spacing_pct * idx)
+            lower_price = current_price * (1 - buy_spacing_pct * idx)
+            upper_price = current_price * (1 + sell_spacing_pct * idx)
 
             if trend != TrendBias.SHORT:
                 levels.append(
@@ -132,8 +243,11 @@ class GridStrategy:
         current_price = float(latest["close"])
         atr_pct = float(latest["atr_pct"])
         adx_value = float(latest["adx"])
-        trend = self.determine_trend(float(latest["ema_fast"]), float(latest["ema_slow"]))
-        spacing = self.compute_spacing_pct(atr_pct)
+        ema_fast_val = float(latest["ema_fast"])
+        ema_slow_val = float(latest["ema_slow"])
+        trend = self.determine_trend(ema_fast_val, ema_slow_val)
+        base_spacing = self.compute_spacing_pct(atr_pct)
+        buy_spacing, sell_spacing = self.compute_asymmetric_spacing(base_spacing, trend, adx_value)
 
         pause_grid = self.config.enable_adx_filter and adx_value > self.config.adx_threshold
         reason = "grid_active"
@@ -146,7 +260,7 @@ class GridStrategy:
         # Keep levels available even when ADX pauses new grids;
         # runtime may use controlled fallback paths. (matches PROYECTO2)
         levels = self._build_levels(
-            current_price=current_price, spacing_pct=spacing, trend=trend, target_size=target_size
+            current_price=current_price, buy_spacing_pct=buy_spacing, sell_spacing_pct=sell_spacing, trend=trend, target_size=target_size
         )
         if pause_grid:
             reason = f"adx_above_threshold:{adx_value:.2f}"
@@ -156,7 +270,7 @@ class GridStrategy:
         return StrategySignal(
             generated_at=datetime.now(UTC),
             current_price=current_price,
-            spacing_pct=spacing,
+            spacing_pct=base_spacing,
             trend_bias=trend,
             adx_value=adx_value,
             atr_pct=atr_pct,
@@ -165,7 +279,11 @@ class GridStrategy:
             target_notional=target_size,
             levels=levels,
             reason=reason,
-            close_history=market_df["close"].tail(50).copy(),
+            close_history=market_df["close"].tail(50).copy().tolist(),
+            ema_fast_val=ema_fast_val,
+            ema_slow_val=ema_slow_val,
+            buy_spacing_pct=buy_spacing,
+            sell_spacing_pct=sell_spacing,
         )
 
     def estimate_required_capital(self, signal: StrategySignal) -> float:

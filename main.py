@@ -89,6 +89,15 @@ class TradingBot:
 
     async def startup(self) -> None:
         """Initialize runtime state and recover orphan exchange data."""
+        from core.reinvestment import ReinvestmentEngine
+        
+        # Load account info
+        free_usdt = await self.exchange.get_balance(coin=self.quote_coin)
+        
+        self.reinvestment_engine = ReinvestmentEngine(
+            initial_baseline=free_usdt,
+            config=self.settings.grid
+        )
         self.state.running = True
         self.state.started_at = datetime.now(UTC)
         self.db.update_bot_state(
@@ -116,7 +125,10 @@ class TradingBot:
         for symbol, manager in self.order_managers.items():
             latest = latest_grid_states.get(symbol)
             if latest:
-                manager.set_spacing(float(latest.get("spacing_pct") or 0.0))
+                manager.set_spacing(
+                    float(latest.get("buy_spacing_pct", latest.get("spacing_pct", 0.0))),
+                    float(latest.get("sell_spacing_pct", 0.0))
+                )
                 
                 # D4 FIX: Restore grid anchors so they aren't overwritten by the first loop save
                 if latest.get("grid_anchor_price"):
@@ -245,10 +257,46 @@ class TradingBot:
                         first_signal.pause_new_grid,
                     )
 
+                # Save latest indicators to runtime_config for the dashboard
+                indicators_dump = {
+                    sym: {
+                        "atr": sig.atr_pct * sig.current_price,
+                        "atr_pct": sig.atr_pct * 100.0,
+                        "adx": sig.adx_value,
+                        "ema_fast": sig.ema_fast_val,
+                        "ema_slow": sig.ema_slow_val,
+                        "trend": sig.trend_bias.value,
+                        "current_price": sig.current_price
+                    } for sym, sig in signals.items()
+                }
+                await asyncio.to_thread(self.db.set_runtime_config, "latest_indicators", indicators_dump)
+
                 # Risk evaluation — mark-to-market equity (R1 fix)
                 equity, free_balance = await self.exchange.get_portfolio_equity(
                     symbols=self.symbols, quote_coin=self.quote_coin,
                 )
+                
+                # Phase G: Evaluate Dynamic Reinvestment
+                if hasattr(self, 'reinvestment_engine'):
+                    status_emergency = False # Fallback check safely
+                    if hasattr(self.state, 'status'):
+                        status_emergency = self.state.status == BotStatus.EMERGENCY
+                        
+                    if status_emergency:
+                        self.reinvestment_engine.reinitialize_after_stop(free_balance)
+                    else:
+                        dynamic_baseline = self.reinvestment_engine.maybe_recalculate(
+                            current_free_equity=free_balance,
+                            is_bot_stopped=(not self.state.running or self.state.manual_paused)
+                        )
+                        # Push scaled configuration down to active strategies
+                        initial = getattr(self.reinvestment_engine, '_initial_baseline', 1.0)
+                        if initial > 0:
+                            multiplier = dynamic_baseline / initial
+                            scaled_base_size = self.settings.grid.order_size_usdt * multiplier
+                            for strat in self.strategies.values():
+                                strat.config.order_size_usdt = scaled_base_size
+                
                 risk_decision = self.risk_manager.evaluate(
                     equity=equity, now=datetime.now(UTC),
                 )
@@ -330,6 +378,11 @@ class TradingBot:
             return
         self._shutdown_event.set()
         self.state.running = False
+
+        try:
+            await asyncio.to_thread(self.db.stop_writer)
+        except Exception as exc:
+            logger.error("Stopping DB writer failed: {}", exc)
 
         try:
             await asyncio.gather(
@@ -564,9 +617,56 @@ class TradingBot:
             if is_new and (active_count + new_selections) >= self.settings.grid.max_active_pairs:
                 continue
                 
-            # FIX #3: Compare required margin against free_balance instead of total equity
-            if required > available_balance:
+            # FIX #3 & #4: Graceful capital scaling logic over binary skip
+            live_price = live_prices.get(symbol, signal.current_price)
+            rules = symbol_rules.get(symbol)
+            if not rules:
                 continue
+
+            # Assuming 3 is the minimum viable levels
+            MIN_VIABLE_LEVELS = 3
+            MINIMUM_PROFIT_BUFFER = 1.002
+            TAKER_FEE_RATE = 0.001 # Approximation if fee rate is not in rules
+
+            if required > available_balance:
+                # Stage 1: Absolute minimum viability
+                min_threshold = rules.min_qty * live_price * MIN_VIABLE_LEVELS
+                if available_balance < min_threshold:
+                    logger.debug(
+                        f"[Capital] Skipping {symbol}: available={available_balance:.2f}, "
+                        f"below minimum viable threshold {min_threshold:.2f} USDT."
+                    )
+                    continue
+                
+                # Stage 2: Calculate scaled signal
+                scale_factor = available_balance / required
+                scaled_signal = signal.scale(scale_factor)
+                
+                # Stage 3: Validate scaled grid viability
+                viable = True
+                if scaled_signal.level_count < MIN_VIABLE_LEVELS:
+                    viable = False
+                for lvl in scaled_signal.levels:
+                    # check actual required notional & qty min rules
+                    if lvl.qty * live_price < rules.min_notional or lvl.qty < rules.min_qty:
+                        viable = False
+                        break
+                if scaled_signal.grid_spread_pct < (2 * TAKER_FEE_RATE * MINIMUM_PROFIT_BUFFER):
+                    viable = False
+
+                if not viable:
+                    logger.debug(
+                        f"[Capital] Skipping {symbol}: scaled grid is not economically viable "
+                        f"at {available_balance:.2f} USDT."
+                    )
+                    continue
+
+                logger.info(
+                    f"[Capital] Scaled {symbol} grid from {required:.2f} to {available_balance:.2f} "
+                    f"USDT (factor: {scale_factor:.2f})."
+                )
+                signal = scaled_signal
+                required = available_balance
 
             # S3: liquidity pre-check
             try:
@@ -616,7 +716,9 @@ class TradingBot:
                 continue
             try:
                 placed = await manager.place_grid_orders(
-                    levels=signal.levels, spacing_pct=signal.spacing_pct,
+                    levels=signal.levels,
+                    buy_spacing_pct=signal.buy_spacing_pct,
+                    sell_spacing_pct=signal.sell_spacing_pct,
                 )
                 
                 # SG4: Persist anchor values upon successful placement
@@ -749,7 +851,8 @@ class TradingBot:
                 if signal is None:
                     continue
                 state = manager.to_grid_state(
-                    spacing_pct=signal.spacing_pct,
+                    buy_spacing_pct=signal.buy_spacing_pct,
+                    sell_spacing_pct=signal.sell_spacing_pct,
                     trend_bias=str(signal.trend_bias),
                 )
                 self.db.save_grid_state(state)
@@ -904,6 +1007,7 @@ class TradingBot:
                 total_trades=int(stats["total_trades"]),
             )
             self.db.insert_metrics(metrics)
+            self.db.record_equity(capital=equity, drawdown_pct=drawdown)
         await asyncio.to_thread(_sync_persist)
 
     @staticmethod
@@ -983,6 +1087,7 @@ async def run_bot() -> None:
         domain=settings.exchange.domain,
         tld=settings.exchange.tld,
     )
+    logger.info(f"BOOT ENV: domain={settings.exchange.domain}, tld={settings.exchange.tld}, api_key={settings.exchange.api_key[:5]}...")
 
     strategies: dict[str, GridStrategy] = {}
     order_managers: dict[str, OrderManager] = {}

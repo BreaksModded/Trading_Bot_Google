@@ -117,6 +117,21 @@ class GridSettings(BaseSettings):
     leverage: int = Field(default=1, ge=1, le=10, description="Leverage (1 = spot)")
     loop_interval_seconds: int = Field(default=15, ge=5, le=300, description="Main loop interval")
 
+    # --- Phase G: Asymmetric Grid Bias ---
+    enable_asymmetric_grid: bool = Field(default=False, description="Enable asymmetric grid bias")
+    asymmetric_bearish_buy_factor: float = Field(default=1.35, gt=1.0, lt=3.0, description="Widen buys in downtrend")
+    asymmetric_bearish_sell_factor: float = Field(default=0.70, gt=0.0, lt=1.0, description="Tighten sells in downtrend")
+    asymmetric_bullish_buy_factor: float = Field(default=0.80, gt=0.0, lt=1.0, description="Tighten buys in uptrend")
+    asymmetric_bullish_sell_factor: float = Field(default=1.25, gt=1.0, lt=3.0, description="Widen sells in uptrend")
+    asymmetric_min_profit_multiple: float = Field(default=1.15, ge=1.0, le=3.0, description="Min profit spread guard")
+
+    # --- Phase G: Dynamic Profit Reinvestment ---
+    enable_profit_reinvestment: bool = Field(default=False, description="Enable auto-compounding")
+    reinvestment_recalc_interval_seconds: int = Field(default=3600, ge=300, le=86400, description="Seconds between baseline recalcs")
+    reinvestment_equity_allocation_pct: float = Field(default=0.90, ge=0.50, le=0.99, description="Percentage of total equity to trade")
+    reinvestment_max_step_growth_pct: float = Field(default=0.05, ge=0.005, le=0.20, description="Max baseline growth per recalc")
+    reinvestment_min_baseline_floor_pct: float = Field(default=0.80, ge=0.30, le=0.99, description="Floor threshold for drawdown sizing")
+
     @field_validator("symbols", mode="before")
     @classmethod
     def _split_symbols(cls, value: Any) -> list[str]:

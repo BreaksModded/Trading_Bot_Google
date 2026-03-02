@@ -104,6 +104,7 @@ class BybitExchangeClient:
             api_secret=self.api_secret,
             domain=self.domain,
             tld=self.tld,
+            recv_window=20000,
         )
         return self._http_client
 
@@ -130,7 +131,7 @@ class BybitExchangeClient:
                     # A3: Retry on transient issues and rate limits
                     is_transient = any(
                         x in err_str for x in 
-                        ["rate limit", "10006", "10018", "timeout", "connection", "500", "502", "503", "504"]
+                        ["rate limit", "10002", "10006", "10018", "timeout", "connection", "500", "502", "503", "504", "retryable"]
                     )
                     if is_transient:
                         sleep_time = 2 ** attempt

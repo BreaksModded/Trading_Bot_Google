@@ -121,11 +121,23 @@ class TelegramNotifier:
         tg_app.add_handler(CommandHandler("start", start_cmd))
         tg_app.add_handler(CommandHandler("resume", resume_cmd))
         tg_app.add_handler(CommandHandler("config", config_cmd))
+        tg_app.add_error_handler(self._on_telegram_error)
 
-        await tg_app.initialize()
-        await tg_app.start()
-        await tg_app.updater.start_polling(drop_pending_updates=True)
-        logger.info("Telegram command bot started.")
+        try:
+            await tg_app.initialize()
+            await tg_app.start()
+            await tg_app.updater.start_polling(drop_pending_updates=True)
+            self._telegram_available = True
+            logger.info("Telegram command bot started.")
+        except Exception as e:
+            logger.warning(
+                f"[Notifier] Telegram polling failed to start: {e}. "
+                f"Bot will operate without Telegram commands.",
+                exc_info=True
+            )
+            self._telegram_available = False
+            return
+
         try:
             await asyncio.Event().wait()
         except asyncio.CancelledError:
@@ -133,8 +145,12 @@ class TelegramNotifier:
             await tg_app.stop()
             await tg_app.shutdown()
 
+    async def _on_telegram_error(self, update: Any, context: Any) -> None:
+        """Called by python-telegram-bot on polling errors."""
+        logger.warning(f"[Notifier] Telegram API error (non-fatal): {context.error}")
+
     async def _send(self, message: str, parse_mode: str = "HTML") -> bool:
-        if not self.enabled or not self._bot:
+        if not self.enabled or not getattr(self, "_telegram_available", True) or not self._bot:
             logger.debug(f"Telegram disabled, message not sent: {message[:50]}...")
             return False
         try:
@@ -146,7 +162,7 @@ class TelegramNotifier:
             logger.debug(f"Telegram message sent: {message[:50]}...")
             return True
         except Exception as e:
-            logger.error(f"Telegram send failed: {e}")
+            logger.warning(f"Telegram send failed: {e}")
             return False
 
     # ── Formatted Messages ────────────────────────────────────────────

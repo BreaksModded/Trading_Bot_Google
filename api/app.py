@@ -175,13 +175,18 @@ def _build_overview_payload(app: FastAPI) -> dict[str, Any]:
     active_symbols = settings.active_symbols
     quote_coin = settings.parse_quote_coin(active_symbols[0]) if active_symbols else settings.quote_coin
 
+    safe_grid_states = [dict(s) for s in grid_states]
+    latest_indicators = db.get_runtime_config("latest_indicators") or {}
+
     return {
         "bot_state": db.get_bot_state(),
         "metrics": db.get_latest_metrics() or {},
-        "grid": {"levels_json": grid_levels},
+        "grid_levels": grid_levels,
+        "grid_states": safe_grid_states,
         "latest_trade": next(iter(db.get_recent_trades(limit=1)), None),
         "quote_coin": quote_coin,
         "active_symbols": active_symbols,
+        "latest_indicators": latest_indicators,
     }
 
 

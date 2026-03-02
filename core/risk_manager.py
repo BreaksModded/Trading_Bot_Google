@@ -36,6 +36,10 @@ class RiskManager:
         self.current_day: date | None = None
         self.paused_until: datetime | None = None
         self._price_windows: dict[str, deque[tuple[datetime, float]]] = {}
+        
+        self._last_price_shock_eval: float = 0.0
+        self._PRICE_SHOCK_EVAL_INTERVAL: float = 5.0
+        self._cached_price_shock_result: float = 0.0
 
     def _roll_day(self, now: datetime, equity: float) -> None:
         if self.current_day != now.date():
@@ -118,7 +122,13 @@ class RiskManager:
             )
 
         # Hourly price shock check
-        hourly_move = self.price_move_one_hour()
+        import time
+        t_now = time.monotonic()
+        if (t_now - self._last_price_shock_eval) >= self._PRICE_SHOCK_EVAL_INTERVAL:
+            self._cached_price_shock_result = self.price_move_one_hour()
+            self._last_price_shock_eval = t_now
+
+        hourly_move = self._cached_price_shock_result
         if hourly_move >= self.max_hourly_move_pct:
             return RiskDecision(
                 allow_trading=False,

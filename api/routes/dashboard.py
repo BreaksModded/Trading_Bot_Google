@@ -39,6 +39,26 @@ async def get_bot_status(request: Request, username: str = Depends(verify_token)
     active_symbols = settings.active_symbols
     quote_coin = settings.parse_quote_coin(active_symbols[0]) if active_symbols else settings.quote_coin
 
+    initial_capital = settings.grid.capital_usdt
+    try:
+        with db._cursor() as cur:
+            cur.execute("SELECT capital FROM equity_curve ORDER BY timestamp ASC LIMIT 1")
+            row = cur.fetchone()
+            if row:
+                row_dict = dict(row)
+                if "capital" in row_dict and row_dict["capital"] is not None:
+                    initial_capital = float(row_dict["capital"])
+    except Exception:
+        pass
+
+    daily_loss_pct = 0.0
+    pnl_daily = metrics.get("pnl_daily", 0.0)
+    equity = metrics.get("equity", 1.0)
+    if pnl_daily < 0 and equity > 0:
+        daily_loss_pct = (abs(pnl_daily) / equity) * 100.0
+
+    latest_indicators = db.get_runtime_config("latest_indicators") or {}
+
     return {
         "timestamp": datetime.now(UTC).isoformat(),
         "bot_state": bot_state,
@@ -50,17 +70,20 @@ async def get_bot_status(request: Request, username: str = Depends(verify_token)
         },
         "capital": {
             "current": metrics.get("equity", 0.0),
-            "initial": settings.grid.capital_usdt,
+            "initial": initial_capital,
         },
         "drawdown_pct": metrics.get("drawdown_pct", 0.0),
+        "daily_loss_pct": daily_loss_pct,
         "win_rate": metrics.get("win_rate", 0.0),
         "sharpe_ratio": metrics.get("sharpe_ratio", 0.0),
         "total_trades": stats.get("total_trades", 0),
         "trade_stats": stats,
         "grid_levels": grid_levels,
+        "grid_states": grid_states,
         "latest_trade": latest_trade,
         "quote_coin": quote_coin,
         "active_symbols": active_symbols,
+        "latest_indicators": latest_indicators,
     }
 
 

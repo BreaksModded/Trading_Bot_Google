@@ -53,7 +53,8 @@ class OrderManager:
         self.max_open_orders = max_open_orders
         self.default_spacing_pct = default_spacing_pct
         self._orders: dict[str, ManagedOrder] = {}
-        self._spacing_pct: float = 0.0
+        self._buy_spacing_pct: float = 0.0
+        self._sell_spacing_pct: float = 0.0
         self._lock = asyncio.Lock()
         self._confirmed_fill_ids: set[str] = set()
         self._processed_fill_keys: set[str] = set()
@@ -68,10 +69,11 @@ class OrderManager:
         # R8: failed inverse orders queued for retry
         self._pending_inverse_retries: list[dict] = []
 
-    def set_spacing(self, spacing_pct: float) -> None:
+    def set_spacing(self, buy_spacing_pct: float, sell_spacing_pct: float = 0.0) -> None:
         """Restore spacing from persisted state after restart/recovery."""
-        if spacing_pct > 0:
-            self._spacing_pct = spacing_pct
+        if buy_spacing_pct > 0:
+            self._buy_spacing_pct = buy_spacing_pct
+            self._sell_spacing_pct = sell_spacing_pct if sell_spacing_pct > 0 else buy_spacing_pct
 
     @property
     def open_orders(self) -> list[ManagedOrder]:
@@ -81,7 +83,7 @@ class OrderManager:
         ]
 
     async def place_grid_orders(
-        self, levels: list[GridLevel], spacing_pct: float,
+        self, levels: list[GridLevel], buy_spacing_pct: float, sell_spacing_pct: float
     ) -> list[ManagedOrder]:
         """Place the current grid levels and track resulting exchange order IDs."""
         async with self._lock:
@@ -97,24 +99,47 @@ class OrderManager:
             if not levels:
                 return []
 
-            self._spacing_pct = spacing_pct
+            self._buy_spacing_pct = buy_spacing_pct
+            self._sell_spacing_pct = sell_spacing_pct
             managed: list[ManagedOrder] = []
+            level_tasks = []
+            level_link_ids = []
+            
+            existing_level_ids = {
+                self._root_level_id(o.level_id) for o in self.open_orders
+            }
+            
             for level in levels:
-                # Generate unique link id
-                base_id = str(level.level_id)
-                if base_id.startswith("entry-"):
-                    base_id = base_id[len("entry-"):]
+                base_id = self._root_level_id(str(level.level_id))
+                if base_id in existing_level_ids:
+                    continue
                 
                 timestamp_ms = int(datetime.now(UTC).timestamp() * 1000)
                 link_id = f"entry-{base_id}-{timestamp_ms}"[:36]
+                level_link_ids.append(link_id)
 
-                order_id = await self.exchange.place_limit_order(
-                    symbol=self.symbol,
-                    side=str(level.side),
-                    qty=level.qty,
-                    price=level.price,
-                    orderLinkId=link_id,
+                level_tasks.append(
+                    self.exchange.place_limit_order(
+                        symbol=self.symbol,
+                        side=str(level.side),
+                        qty=level.qty,
+                        price=level.price,
+                        orderLinkId=link_id,
+                    )
                 )
+
+            results = await asyncio.gather(*level_tasks, return_exceptions=True)
+            failed_count = 0
+            for i, result in enumerate(results):
+                level = levels[i]
+                link_id = level_link_ids[i]
+                
+                if isinstance(result, Exception):
+                    logger.error(f"Grid level {i} placement failed: {result}", exc_info=result)
+                    failed_count += 1
+                    continue
+
+                order_id = str(result)
                 managed_order = ManagedOrder(
                     order_id=order_id,
                     level_id=link_id,
@@ -125,6 +150,9 @@ class OrderManager:
                 )
                 self._orders[order_id] = managed_order
                 managed.append(managed_order)
+
+            if failed_count > 0:
+                logger.warning("{}: Partial grid placement: {} levels failed, {} succeeded", self.symbol, failed_count, len(managed))
             return managed
 
     async def cancel_all(self) -> None:
@@ -187,7 +215,12 @@ class OrderManager:
                         order.status = OrderStatus.FILLED
                     else:
                         # FIX #4: REST Fallback check for missing WS fills
-                        history = await self.exchange.get_order_history(symbol=self.symbol, order_id=order_id)
+                        try:
+                            history = await self.exchange.get_order_history(symbol=self.symbol, order_id=order_id)
+                        except Exception as e:
+                            logger.warning("{}: Error reconciling order {}: {}", self.symbol, order_id, e)
+                            history = None
+                            
                         if history:
                             status = str(history.get("orderStatus", "")).upper()
                             if status == "FILLED":
@@ -210,8 +243,10 @@ class OrderManager:
             for retry in retries:
                 try:
                     root_id = self._root_level_id(retry["level_id"])
-                    timestamp_ms = int(datetime.now(UTC).timestamp() * 1000)
-                    fresh_link_id = f"inverse-{root_id}-{timestamp_ms}"[:36]
+                    timestamp_ms = str(int(datetime.now(UTC).timestamp() * 1000))
+                    # Prevent truncation of the timestamp by shortening the root_id
+                    short_root = root_id[-18:] if len(root_id) > 18 else root_id
+                    fresh_link_id = f"inv-{short_root}-{timestamp_ms}"
                     
                     inv_id = await self.exchange.place_limit_order(
                         symbol=self.symbol,
@@ -240,6 +275,13 @@ class OrderManager:
                 order_id = str(raw.get("orderId") or raw.get("order_id"))
                 if order_id in self._orders:
                     continue
+                
+                # Protect against absorbing global stop losses or market conditionals
+                order_type = str(raw.get("orderType", "")).upper()
+                stop_order_type = str(raw.get("stopOrderType", "")).upper()
+                if order_type != "LIMIT" or (stop_order_type and stop_order_type != "UNKNOWN"):
+                    continue
+
                 self._orders[order_id] = ManagedOrder(
                     order_id=order_id,
                     level_id=str(raw.get("orderLinkId") or f"recovered-{order_id}"),
@@ -297,16 +339,17 @@ class OrderManager:
 
             # Place inverse order for grid rebalancing
             inverse_side = OrderSide.SELL if side == OrderSide.BUY else OrderSide.BUY
-            spacing = self._spacing_pct if self._spacing_pct > 0 else self.default_spacing_pct
-            if spacing > 0:
-                if inverse_side == OrderSide.SELL:
-                    inverse_price = price * (1 + spacing)
-                else:
-                    inverse_price = price * (1 - spacing)
+            if inverse_side == OrderSide.SELL:
+                spacing = self._sell_spacing_pct if self._sell_spacing_pct > 0 else self.default_spacing_pct
+                inverse_price = price * (1 + spacing)
+            else:
+                spacing = self._buy_spacing_pct if self._buy_spacing_pct > 0 else self.default_spacing_pct
+                inverse_price = price * (1 - spacing)
                 
-                timestamp_ms = int(datetime.now(UTC).timestamp() * 1000)
+                timestamp_ms = str(int(datetime.now(UTC).timestamp() * 1000))
                 root_id = self._root_level_id(managed.level_id)
-                inv_link_id = f"inverse-{root_id}-{timestamp_ms}"[:36]
+                short_root = root_id[-18:] if len(root_id) > 18 else root_id
+                inv_link_id = f"inv-{short_root}-{timestamp_ms}"
 
                 # R8: wrap in try/except to prevent fill loss on inverse failure
                 try:
@@ -365,12 +408,11 @@ class OrderManager:
 
     @staticmethod
     def _root_level_id(level_id: str) -> str:
-        """Strip 'inverse-', 'entry-' prefixes and timestamp suffix to get the original grid level ID."""
+        """Strip prefixes and timestamp suffix to get the original grid level ID."""
         normalized = str(level_id or "")
-        while normalized.startswith("inverse-"):
-            normalized = normalized[len("inverse-"):]
-        while normalized.startswith("entry-"):
-            normalized = normalized[len("entry-"):]
+        for prefix in ("inverse-", "inv-", "entry-"):
+            if normalized.startswith(prefix):
+                normalized = normalized[len(prefix):]
             
         parts = normalized.split("-")
         if len(parts) > 1 and parts[-1].isdigit() and len(parts[-1]) >= 13:
@@ -378,7 +420,7 @@ class OrderManager:
             
         return normalized or "level"
 
-    def to_grid_state(self, spacing_pct: float, trend_bias: str) -> GridState:
+    def to_grid_state(self, buy_spacing_pct: float, sell_spacing_pct: float, trend_bias: str) -> GridState:
         """Serialize current pending orders to persistence model."""
         levels = [
             GridLevel(
@@ -392,11 +434,13 @@ class OrderManager:
         ]
         return GridState(
             symbol=self.symbol,
-            spacing_pct=spacing_pct,
+            spacing_pct=buy_spacing_pct,
             trend_bias=trend_bias,
             levels=levels,
             last_sync_time=datetime.now(UTC),
             grid_created_at=self.grid_created_at,
             grid_anchor_price=self.grid_anchor_price,
             pending_retries=list(self._pending_inverse_retries),
+            buy_spacing_pct=buy_spacing_pct,
+            sell_spacing_pct=sell_spacing_pct,
         )
