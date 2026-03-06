@@ -14,6 +14,7 @@ Architecture note:
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 from typing import Annotated, Any, Literal
 
@@ -114,6 +115,43 @@ class GridSettings(BaseSettings):
     grid_refresh_max_per_day: int = Field(
         default=4, ge=1, le=20, description="Hard cap per symbol per calendar day"
     )
+
+    # ── Phase H: Grid Refresh Master Switch & Safety Gates ────────────
+    enable_grid_refresh: bool = Field(
+        default=False,
+        description="Master switch for hybrid grid refresh (disabled = zero behavior change)",
+    )
+    enable_refresh_price_trigger: bool = Field(
+        default=True, description="Use price deviation as a refresh trigger"
+    )
+    enable_refresh_time_trigger: bool = Field(
+        default=True, description="Use time expiry as a refresh trigger"
+    )
+    refresh_adx_block_threshold: float = Field(
+        default=35.0, ge=20.0, le=60.0,
+        description="Block refresh if ADX above this AND trend is SHORT",
+    )
+    refresh_max_inventory_ratio: float = Field(
+        default=0.40, ge=0.10, le=0.80,
+        description="Block refresh if inventory/capital ratio exceeds this",
+    )
+    refresh_cooldown_seconds: int = Field(
+        default=1800, ge=300, le=86400,
+        description="Minimum seconds between refreshes per symbol",
+    )
+    refresh_min_move_pct: float = Field(
+        default=0.02, ge=0.005, le=0.10,
+        description="Block refresh if price moved less than this since last refresh",
+    )
+    refresh_skip_if_orders_above: int = Field(
+        default=2, ge=0, le=10,
+        description="Skip refresh if more than N buy orders still open",
+    )
+    refresh_failure_cooldown_seconds: int = Field(
+        default=300, ge=60, le=3600,
+        description="Cooldown after a failed refresh attempt",
+    )
+
     leverage: int = Field(default=1, ge=1, le=10, description="Leverage (1 = spot)")
     loop_interval_seconds: int = Field(default=15, ge=5, le=300, description="Main loop interval")
 
@@ -131,6 +169,150 @@ class GridSettings(BaseSettings):
     reinvestment_equity_allocation_pct: float = Field(default=0.90, ge=0.50, le=0.99, description="Percentage of total equity to trade")
     reinvestment_max_step_growth_pct: float = Field(default=0.05, ge=0.005, le=0.20, description="Max baseline growth per recalc")
     reinvestment_min_baseline_floor_pct: float = Field(default=0.80, ge=0.30, le=0.99, description="Floor threshold for drawdown sizing")
+
+    # ── Phase I: Dynamic Capital-Proportional Order Sizing ─────────
+    # Instead of fixed GRID_ORDER_SIZE_USDT, compute each order as a
+    # percentage of available capital:
+    #   order_size = available_capital × order_size_pct_per_level
+    #
+    # Example: €2,000 free, 2 pairs × 5 levels, pct=0.05
+    #   → €100/order, max deployment = 2×5×100 = €1,000 (50%)
+    enable_dynamic_order_sizing: bool = Field(
+        default=False,
+        description="Use percentage-based sizing instead of fixed USDT amount (disabled = current behavior)",
+    )
+    order_size_pct_per_level: float = Field(
+        default=0.05, ge=0.01, le=0.30,
+        description="Fraction of available capital per grid level (5% = 0.05, 14% = 0.14)",
+    )
+    dynamic_sizing_min_order_usdt: float = Field(
+        default=10.0, gt=0,
+        description="Minimum order size floor — never below this regardless of percentage",
+    )
+    dynamic_sizing_max_order_usdt: float = Field(
+        default=0.0, ge=0,
+        description="Maximum order size cap (0 = no cap)",
+    )
+
+    # ── Liquidity pre-check (S3) ────────────────────────────────────
+    liquidity_orderbook_levels: int = Field(
+        default=25, ge=5, le=200,
+        description="Orderbook depth levels fetched for bid-depth check",
+    )
+    liquidity_max_spread_pct: float = Field(
+        default=0.005, ge=0.001, le=0.10,
+        description="Legacy global spread limit (fallback if per-symbol not set)",
+    )
+    liquidity_min_depth_multiplier: float = Field(
+        default=3.0, ge=0.5, le=20.0,
+        description="Required bid depth = estimated_grid_capital × this multiplier",
+    )
+    # Per-symbol spread fallback (used when GRID_SPREAD_LIMIT_<SYM> not set)
+    liquidity_spread_fallback: float = Field(
+        default=0.005, ge=0.0005, le=0.05,
+        description="Fallback spread limit for symbols without a specific limit",
+    )
+    spread_consecutive_failures_alert: int = Field(
+        default=20, ge=5, le=100,
+        description="Consecutive cycles with spread above limit before WARNING",
+    )
+
+    # ── Hard Stop-Loss ─────────────────────────────────────────────
+    hard_stop_loss_pct: float = Field(
+        default=0.08, ge=0.02, le=0.30,
+        description="Stop-loss trigger distance below avg_cost (8% = 0.08)",
+    )
+
+    # ── Inventory Protection ────────────────────────────────────────
+    max_inventory_ratio: float = Field(
+        default=0.30, ge=0.05, le=0.80,
+        description="Max inventory value / allocated capital ratio before blocking new buys",
+    )
+    inventory_exit_hours: float = Field(
+        default=24.0, ge=1.0, le=168.0,
+        description="Hours an inverse sell can be pending before exit strategy activates",
+    )
+    inventory_exit_above_cost_pct: float = Field(
+        default=0.005, ge=0.0, le=0.05,
+        description="Percentage above cost basis for inventory exit (0.5% = 0.005)",
+    )
+
+    # ── Inventory Soft Stop-Loss ────────────────────────────────────
+    enable_inventory_stop_loss: bool = Field(
+        default=False,
+        description="Enable soft stop-loss: sell all inventory at market if price drops below threshold",
+    )
+    inventory_stop_loss_pct: float = Field(
+        default=0.10, ge=0.01, le=0.50,
+        description="Stop-loss distance below avg_cost (10% = 0.10)",
+    )
+    inventory_stop_loss_per_symbol: dict[str, float] = Field(
+        default_factory=dict,
+        description=(
+            "Per-symbol stop-loss override (takes priority over inventory_stop_loss_pct). "
+            "High-volatility altcoins need wider thresholds. "
+            "Example (JSON inline in .env): "
+            '\'{"SOLUSDC": 0.15, "XRPUSDC": 0.15, "ADAUSDC": 0.18}\''
+        ),
+    )
+
+    # ── Regime Classification ──────────────────────────────────────
+    regime_adx_ranging: float = Field(
+        default=20.0, ge=10.0, le=30.0,
+        description="ADX below this → ranging market (ideal for grid)",
+    )
+    regime_adx_trending: float = Field(
+        default=30.0, ge=20.0, le=50.0,
+        description="ADX above this → strong trend",
+    )
+    regime_rsi_upper: float = Field(
+        default=65.0, ge=55.0, le=80.0,
+        description="RSI above this with high ADX → trending up",
+    )
+    regime_rsi_lower: float = Field(
+        default=35.0, ge=20.0, le=45.0,
+        description="RSI below this with high ADX → trending down",
+    )
+
+    # ── Volume Filter ──────────────────────────────────────────────
+    volume_filter_enabled: bool = Field(
+        default=False,
+        description="Enable volume ratio filter for grid placement",
+    )
+    min_volume_ratio_filter: float = Field(
+        default=0.70, ge=0.10, le=5.0,
+        description="Minimum volume/median ratio required for grid placement",
+    )
+
+    # ── Dynamic Levels ─────────────────────────────────────────────
+    dynamic_levels_enabled: bool = Field(
+        default=False,
+        description="Enable dynamic adjustment of grid levels based on ATR",
+    )
+    levels_low_vol_atr: float = Field(
+        default=0.008, ge=0.002, le=0.02,
+        description="ATR% below this → reduce levels",
+    )
+    levels_high_vol_atr: float = Field(
+        default=0.015, ge=0.008, le=0.05,
+        description="ATR% above this → increase levels",
+    )
+    levels_max: int = Field(
+        default=7, ge=3, le=15,
+        description="Maximum grid levels in high volatility",
+    )
+
+    def get_spread_limit(self, symbol: str) -> float:
+        """Return the per-symbol spread limit, or fallback if not configured."""
+        normalized = symbol.replace("/", "").replace("-", "").upper()
+        env_key = f"GRID_SPREAD_LIMIT_{normalized}"
+        env_val = os.environ.get(env_key)
+        if env_val is not None:
+            try:
+                return float(env_val)
+            except ValueError:
+                pass
+        return self.liquidity_spread_fallback
 
     @field_validator("symbols", mode="before")
     @classmethod
@@ -199,11 +381,64 @@ class RiskSettings(BaseSettings):
         le=0.20,
         description="Max price movement in 1h before emergency (8%)",
     )
-    daily_pause_hours: int = Field(
-        default=24,
-        ge=1,
-        le=72,
-        description="Hours to pause after daily loss limit hit",
+    daily_loss_pause_hours: float = Field(
+        default=1.0,
+        ge=0.5,
+        le=24.0,
+        description="Minimum pause hours after daily loss CB trigger (resumes early if equity recovers)",
+    )
+
+    # ── Phase J: Price Shock Circuit Breaker — Redesigned ─────────────
+
+    # Minimum price samples before price shock evaluation activates.
+    # Prevents cold-start false positives when the deque has too few points
+    # to represent a real 1-hour window. At ~60s/loop, 10 samples ≈ 10 min
+    # warmup. Valid range: 3–60. Warn below 5 (too sensitive), above 30
+    # (warmup too long for frequent restarts).
+    price_shock_min_samples: int = Field(
+        default=10,
+        ge=3,
+        le=60,
+        description="Minimum price samples for price shock evaluation (cold-start guard)",
+    )
+
+    # Consecutive evaluation cycles where price_move_1h must be BELOW
+    # threshold before the pause is lifted. Prevents false resumption on
+    # choppy markets. At lazy-eval interval of 5s, 3 cycles ≈ 15 s of
+    # confirmed stability. Valid range: 2–10.
+    price_shock_resume_consecutive_cycles: int = Field(
+        default=3,
+        ge=2,
+        le=10,
+        description="Consecutive clean cycles required before auto-resuming after price shock pause",
+    )
+
+    # Seconds a price shock pause can remain active before escalating to a
+    # full emergency stop. Default 7200 = 2 hours. Genuine structural market
+    # events (FTX collapse, March 2020 crash) typically sustain volatility
+    # this long. Valid range: 1800 (30 min)–14400 (4 hours).
+    price_shock_max_pause_duration_seconds: int = Field(
+        default=7200,
+        ge=1800,
+        le=14400,
+        description="Seconds before a sustained price shock escalates to emergency stop (default: 2h)",
+    )
+
+    # Whether to send Telegram notifications when price shock pause
+    # activates and when it auto-resumes. Escalation to emergency stop
+    # always notifies regardless of this flag.
+    price_shock_notify_telegram: bool = Field(
+        default=True,
+        description="Send Telegram notifications for price shock pause/resume events",
+    )
+
+    # ── Emergency Liquidation ─────────────────────────────────────────
+    emergency_liquidate_inventory: bool = Field(
+        default=True,
+        description=(
+            "Market-sell all open inventory on emergency_stop(). "
+            "Set to false to only cancel orders without liquidating."
+        ),
     )
 
 
@@ -363,6 +598,64 @@ class Settings(BaseSettings):
             return self.grid.symbols
         return [self.grid.symbol.strip().upper().replace("/", "").replace("-", "")]
 
+    def validate_trading_params(self) -> None:
+        """Run logical validations on the loaded configuration pool. 
+        Aborts execution if parameters are mutually incompatible or unsafe.
+        """
+        import logging
+        log = logging.getLogger("config")
+        
+        errors = []
+        
+        # 1. EMA sanity
+        if self.indicators.ema_fast >= self.indicators.ema_slow:
+            errors.append(f"EMA Fast ({self.indicators.ema_fast}) must be < EMA Slow ({self.indicators.ema_slow})")
+            
+        # 2. Risk sanity
+        if self.risk.max_daily_loss_pct >= self.risk.max_drawdown_pct:
+            errors.append(
+                f"Daily Loss Pct ({self.risk.max_daily_loss_pct:.1%}) must be strictly less than "
+                f"Emergency Drawdown Pct ({self.risk.max_drawdown_pct:.1%})"
+            )
+            
+        # 3. Capital allocation sanity
+        symbols_count = max(1, len(self.active_symbols))
+        capital_per_symbol = self.grid.capital_usdt / symbols_count
+        required_per_symbol = self.grid.order_size_usdt * self.grid.num_levels
+        if capital_per_symbol < required_per_symbol:
+            log.warning(
+                "Capital WARNING: Allocated capital per symbol ($%.2f) is less than "
+                "the amount required for a full grid ($%.2f). Max inventory gates may trigger early.",
+                capital_per_symbol, required_per_symbol
+            )
+
+        # 3b. order_size_usdt sanity guard (catches GRID_ORDER_SIZE_USDT=300 with small capital)
+        max_safe_order = self.grid.capital_usdt / max(1, self.grid.max_active_pairs) * 0.5
+        if self.grid.order_size_usdt > max_safe_order:
+            log.warning(
+                "order_size_usdt=%.2f may be too large for capital=%.2f "
+                "with max_active_pairs=%d (safe max ≈ %.2f). "
+                "Consider reducing GRID_ORDER_SIZE_USDT.",
+                self.grid.order_size_usdt, self.grid.capital_usdt,
+                self.grid.max_active_pairs, max_safe_order,
+            )
+            
+        # 4. Regime sanity
+        if self.grid.regime_adx_ranging >= self.grid.regime_adx_trending:
+            errors.append(f"Regime ADX Ranging ({self.grid.regime_adx_ranging}) must be < Trending ({self.grid.regime_adx_trending})")
+            
+        if self.grid.regime_rsi_lower >= self.grid.regime_rsi_upper:
+            errors.append(f"Regime RSI Lower ({self.grid.regime_rsi_lower}) must be < Upper ({self.grid.regime_rsi_upper})")
+            
+        # 5. Inventory gate sanity
+        if self.grid.max_inventory_ratio >= 1.0:
+            errors.append(f"max_inventory_ratio ({self.grid.max_inventory_ratio}) should be strictly < 1.0 (100% of allocation)")
+
+        if errors:
+            for err in errors:
+                log.error("CONFIG ERROR: %s", err)
+            raise ValueError("Trading configuration validation failed. Check settings and restart.")
+
     def strategy_dict(self) -> dict:
         """Return strategy parameters consumable by StrategyConfig."""
         return {
@@ -384,6 +677,10 @@ class Settings(BaseSettings):
             "max_drawdown_pct": self.risk.max_drawdown_pct,
             "max_daily_loss_pct": self.risk.max_daily_loss_pct,
             "max_hourly_move_pct": self.risk.max_price_move_1h_pct,
+            "min_price_shock_samples": self.risk.price_shock_min_samples,
+            "price_shock_resume_cycles": self.risk.price_shock_resume_consecutive_cycles,
+            "price_shock_max_pause_secs": self.risk.price_shock_max_pause_duration_seconds,
+            "daily_loss_pause_hours": self.risk.daily_loss_pause_hours,
         }
 
     def public_dict(self) -> dict:

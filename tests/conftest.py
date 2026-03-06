@@ -15,18 +15,8 @@ def mock_exchange():
     """Full AsyncMock of the exchange client with realistic responses."""
     exchange = AsyncMock()
     
-    # Generic realistic successful order response
-    exchange.place_limit_order.return_value = {
-        "orderId": "test_order_123",
-        "orderLinkId": "link_123",
-        "symbol": "BTCUSDT",
-        "price": "50000.0",
-        "qty": "0.1",
-        "side": "Buy",
-        "status": "NEW",
-        "timeInForce": "PostOnly",
-        "orderType": "Limit",
-    }
+    # Generic realistic successful order response (Bybit v5 returns order_id as string)
+    exchange.place_limit_order.return_value = "test_order_123"
     
     exchange.get_open_orders.return_value = []
     exchange.get_order_history.return_value = []

@@ -139,7 +139,9 @@ class Database:
                     is_active        INTEGER NOT NULL DEFAULT 1,
                     grid_created_at  TEXT,
                     grid_anchor_price REAL,
-                    pending_retries_json TEXT NOT NULL DEFAULT '[]'
+                    pending_retries_json TEXT NOT NULL DEFAULT '[]',
+                    position_qty     REAL NOT NULL DEFAULT 0.0,
+                    avg_cost         REAL NOT NULL DEFAULT 0.0
                 );
 
                 CREATE TABLE IF NOT EXISTS performance_snapshots (
@@ -315,42 +317,6 @@ class Database:
                 cur.execute("SELECT COUNT(*) FROM trades")
             return cur.fetchone()[0]
 
-    def get_trade_stats(self) -> dict[str, Any]:
-        """Compute aggregate trade statistics."""
-        with self._cursor() as cur:
-            cur.execute("SELECT COUNT(*) AS total_trades FROM trades")
-            total = cur.fetchone()["total_trades"]
-            if total == 0:
-                return {
-                    "total_trades": 0, "winning_trades": 0, "losing_trades": 0,
-                    "gross_profit": 0.0, "gross_loss": 0.0, "win_rate": 0.0,
-                    "avg_win": 0.0, "avg_loss": 0.0,
-                }
-            cur.execute(
-                "SELECT COUNT(*) AS cnt, COALESCE(SUM(pnl), 0) AS total "
-                "FROM trades WHERE pnl > 0"
-            )
-            win_row = cur.fetchone()
-            cur.execute(
-                "SELECT COUNT(*) AS cnt, COALESCE(SUM(ABS(pnl)), 0) AS total "
-                "FROM trades WHERE pnl < 0"
-            )
-            loss_row = cur.fetchone()
-            wins = win_row["cnt"]
-            losses = loss_row["cnt"]
-            gross_profit = win_row["total"]
-            gross_loss = loss_row["total"]
-            return {
-                "total_trades": total,
-                "winning_trades": wins,
-                "losing_trades": losses,
-                "gross_profit": gross_profit,
-                "gross_loss": gross_loss,
-                "win_rate": (wins / total * 100) if total else 0.0,
-                "avg_win": (gross_profit / wins) if wins else 0.0,
-                "avg_loss": (gross_loss / losses) if losses else 0.0,
-            }
-
     def export_trades_to_csv(self, output_path: Path) -> None:
         with self._cursor() as cur:
             cur.execute("SELECT * FROM trades ORDER BY timestamp")
@@ -374,8 +340,8 @@ class Database:
         with self._cursor() as cur:
             cur.execute(
                 """INSERT INTO grid_states
-                   (timestamp, symbol, spacing_pct, trend_bias, levels_json, is_active, grid_created_at, grid_anchor_price, pending_retries_json)
-                   VALUES (?, ?, ?, ?, ?, 1, ?, ?, ?)""",
+                   (timestamp, symbol, spacing_pct, trend_bias, levels_json, is_active, grid_created_at, grid_anchor_price, pending_retries_json, position_qty, avg_cost)
+                   VALUES (?, ?, ?, ?, ?, 1, ?, ?, ?, ?, ?)""",
                 (
                     datetime.now(UTC).isoformat(),
                     state.symbol,
@@ -385,6 +351,8 @@ class Database:
                     state.grid_created_at.isoformat() if state.grid_created_at else None,
                     state.grid_anchor_price,
                     json.dumps(state.pending_retries, default=str),
+                    state.position_qty,
+                    state.avg_cost,
                 ),
             )
 
@@ -434,6 +402,9 @@ class Database:
                 row["pending_retries"] = []
         else:
             row["pending_retries"] = []
+            
+        row["position_qty"] = float(row.get("position_qty") or 0.0)
+        row["avg_cost"] = float(row.get("avg_cost") or 0.0)
             
         return row
 
@@ -549,15 +520,15 @@ class Database:
         try:
             from datetime import timedelta as _td
             since_24h = datetime.now(UTC) - _td(hours=24)
-            cur2 = self._cursor().__enter__()
-            cur2.execute(
-                "SELECT SUM(pnl) FROM trades WHERE timestamp >= ?",
-                (since_24h.isoformat(),),
-            )
-            r = cur2.fetchone()
-            pnl_24h = float(r[0] or 0.0) if r else 0.0
-        except Exception:
-            pass
+            with self._cursor() as cur2:
+                cur2.execute(
+                    "SELECT SUM(pnl) FROM trades WHERE timestamp >= ?",
+                    (since_24h.isoformat(),),
+                )
+                r = cur2.fetchone()
+                pnl_24h = float(r[0] or 0.0) if r else 0.0
+        except Exception as exc:
+            logger.opt(exception=exc).error("get_trade_stats: failed to compute pnl_24h: {}", exc)
 
         return {
             "total_trades": total_closed_trades,

@@ -25,10 +25,28 @@ async def get_performance_metrics(
     if period in period_map:
         since = datetime.utcnow() - timedelta(days=period_map[period])
 
-    # Stub because compute_performance might not exist on Database yet,
-    # safely fallback to get_latest_metrics if missing
-    metrics = getattr(state.db, "compute_performance", lambda **kw: state.db.get_latest_metrics())(since=since)
-    return metrics if isinstance(metrics, dict) else (metrics.model_dump() if hasattr(metrics, "model_dump") else {})
+    # Trade-level stats — includes profit_factor, win_rate, gross_profit/loss
+    trade_stats = state.db.get_trade_stats(since=since)
+    # Latest equity snapshot — for drawdown_pct and sharpe_ratio (not derivable from trades)
+    latest = state.db.get_latest_metrics() or {}
+
+    return {
+        "period": period,
+        "total_trades": trade_stats.get("total_trades", 0),
+        "total_executions": trade_stats.get("total_executions", 0),
+        "winners": trade_stats.get("winners", 0),
+        "losers": trade_stats.get("losers", 0),
+        "win_rate": trade_stats.get("win_rate", 0.0),
+        "pnl_total": trade_stats.get("total_pnl", 0.0),
+        "pnl_daily": trade_stats.get("pnl_24h", 0.0),
+        "average_pnl": trade_stats.get("average_pnl", 0.0),
+        "gross_profit": trade_stats.get("gross_profit", 0.0),
+        "gross_loss": trade_stats.get("gross_loss", 0.0),
+        "profit_factor": trade_stats.get("profit_factor", 0.0),
+        "drawdown_pct": latest.get("drawdown_pct", 0.0),
+        "sharpe_ratio": latest.get("sharpe_ratio", 0.0),
+        "equity": latest.get("equity", 0.0),
+    }
 
 
 @router.get("/performance/equity")

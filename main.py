@@ -15,12 +15,13 @@ from loguru import logger
 
 from config.settings import Settings
 from core.exchange import BybitExchangeClient, SpotSymbolRules
-from core.grid_refresh import RefreshConfig, RefreshState, is_grid_stale, should_refresh
-from core.order_manager import OrderManager
+from core.grid_refresh import RefreshConfig, RefreshState, is_grid_stale, should_refresh, evaluate_safety_gates
+from core.order_manager import ManagedOrder, OrderManager
+from core.regime import MarketRegime
 from core.risk_manager import RiskDecision, RiskManager
 from core.strategy import GridStrategy, StrategyConfig, StrategySignal
 from data.database import Database
-from data.models import BotStatus, ConfigSnapshot, EventLogRecord, OrderSide, PerformanceMetrics
+from data.models import BotStatus, CircuitBreakerEvent, ConfigSnapshot, EventLogRecord, OrderSide, PerformanceMetrics
 from services.health_monitor import HealthMonitor
 from services.notifier import TelegramNotifier
 
@@ -33,6 +34,42 @@ class BotRuntimeState:
     manual_paused: bool = False
     started_at: datetime | None = None
     last_price: float = 0.0
+
+
+def _reconstruct_avg_cost(recent_trades: list[dict]) -> float:
+    """Reconstruct weighted avg_cost from DB trade history for crash recovery.
+
+    Uses only BUY trades that occurred after the most recent SELL trade,
+    so we never mix cost bases from different trading cycles.
+
+    Args:
+        recent_trades: rows from get_recent_trades(), ordered DESC by timestamp.
+
+    Returns:
+        Weighted avg_cost > 0 if reconstructable, else 0.0.
+    """
+    # Find the most recent SELL (first SELL in DESC order)
+    last_sell_ts: str | None = None
+    for trade in recent_trades:
+        if str(trade.get("side", "")).lower() == "sell":
+            last_sell_ts = str(trade["timestamp"])
+            break
+
+    # Collect BUY trades that are newer than the last SELL
+    open_buys = [
+        t for t in recent_trades
+        if str(t.get("side", "")).lower() == "buy"
+        and (last_sell_ts is None or str(t["timestamp"]) > last_sell_ts)
+        and float(t.get("price") or 0) > 0
+        and float(t.get("qty") or 0) > 0
+    ]
+
+    if not open_buys:
+        return 0.0
+
+    total_value = sum(float(t["price"]) * float(t["qty"]) for t in open_buys)
+    total_qty = sum(float(t["qty"]) for t in open_buys)
+    return total_value / total_qty if total_qty > 0 else 0.0
 
 
 class TradingBot:
@@ -85,10 +122,17 @@ class TradingBot:
         )
         self._refresh_states: dict[str, RefreshState] = {s: RefreshState() for s in self.symbols}
         self._placement_cooldown_until: dict[str, datetime] = {}
+        # Phase J: track previous pause state to detect transitions for Telegram notifications
+        self._price_shock_was_paused: bool = False
+        # Step 2: Per-symbol spread consecutive failure tracking
+        self._spread_failures: dict[str, int] = {}
+
     # ── Lifecycle ─────────────────────────────────────────────────────
 
     async def startup(self) -> None:
         """Initialize runtime state and recover orphan exchange data."""
+        self.settings.validate_trading_params()
+        
         from core.reinvestment import ReinvestmentEngine
         
         # Load account info
@@ -135,10 +179,16 @@ class TradingBot:
                     manager.grid_anchor_price = float(latest["grid_anchor_price"])
                 if latest.get("grid_created_at"):
                     dt_val = latest["grid_created_at"]
-                    if isinstance(dt_val, str):
-                        manager.grid_created_at = datetime.fromisoformat(dt_val.replace("Z", "+00:00"))
-                    else:
-                        manager.grid_created_at = dt_val
+                    try:
+                        if isinstance(dt_val, str):
+                            manager.grid_created_at = datetime.fromisoformat(dt_val.replace("Z", "+00:00"))
+                        else:
+                            manager.grid_created_at = dt_val
+                    except (ValueError, TypeError) as dt_exc:
+                        logger.warning("{}: Could not restore grid_created_at '{}': {}", symbol, dt_val, dt_exc)
+                        
+                # BUG 3 Fix: Restore average cost cleanly
+                manager._avg_cost = float(latest.get("avg_cost") or 0.0)
                         
                 # D8 FIX: Restore pending inverse retries to prevent unhedged grids
                 if latest.get("pending_retries"):
@@ -152,7 +202,54 @@ class TradingBot:
         for symbol, manager in self.order_managers.items():
             recovered = await manager.recover_from_crash()
             recovered_total += len(recovered)
-            
+
+            # SG6.1: Restore _position_qty from exchange balance so has_unhedged_inventory()
+            # works correctly after restart (internal counter resets to 0 on every startup).
+            base_coin = symbol.replace(self.quote_coin, "")
+            try:
+                base_balance = await self.exchange.get_balance(coin=base_coin)
+                if base_balance > 1e-6:
+                    pending_sell_qty = sum(
+                        o.qty for o in manager.open_orders
+                        if str(o.side).upper() in ("SELL", "ORDERSIDEENUM.SELL")
+                    )
+                    unhedged_qty = max(0.0, base_balance - pending_sell_qty)
+                    if unhedged_qty > 1e-6:
+                        manager._position_qty = unhedged_qty
+                        logger.info(
+                            "Restored _position_qty={:.8f} {} from exchange balance "
+                            "(exchange={:.8f}, pending_sells={:.8f})",
+                            unhedged_qty, base_coin, base_balance, pending_sell_qty,
+                        )
+                        # Fix 2: attempt to reconstruct avg_cost from DB trade history
+                        if manager._avg_cost <= 0:
+                            try:
+                                recent_trades = self.db.get_recent_trades(symbol=symbol, limit=50)
+                                reconstructed = _reconstruct_avg_cost(recent_trades)
+                                if reconstructed > 0:
+                                    manager._avg_cost = reconstructed
+                                    manager._position_untracked = False
+                                    logger.info(
+                                        "{}: avg_cost reconstructed from DB trade history: {:.4f}",
+                                        symbol, reconstructed,
+                                    )
+                                else:
+                                    manager._position_untracked = True
+                                    logger.warning(
+                                        "{}: Inventory recovered without cost basis — no usable "
+                                        "DB trades found. Marking as untracked.",
+                                        symbol,
+                                    )
+                            except Exception as exc:
+                                manager._position_untracked = True
+                                logger.warning(
+                                    "{}: avg_cost reconstruction from DB failed: {}. Marking as untracked.",
+                                    symbol, exc,
+                                )
+
+            except Exception as exc:
+                logger.warning("Could not restore position_qty for {}: {}", symbol, exc)
+
             # SG6: Crash recovery inventory safety check
             self._refresh_states[symbol].refresh_in_progress = False
             if manager.has_unhedged_inventory() and not manager.open_orders:
@@ -263,9 +360,11 @@ class TradingBot:
                         "atr": sig.atr_pct * sig.current_price,
                         "atr_pct": sig.atr_pct * 100.0,
                         "adx": sig.adx_value,
+                        "rsi": sig.rsi_value,
                         "ema_fast": sig.ema_fast_val,
                         "ema_slow": sig.ema_slow_val,
                         "trend": sig.trend_bias.value,
+                        "regime": sig.regime,
                         "current_price": sig.current_price
                     } for sym, sig in signals.items()
                 }
@@ -276,7 +375,7 @@ class TradingBot:
                     symbols=self.symbols, quote_coin=self.quote_coin,
                 )
                 
-                # Phase G: Evaluate Dynamic Reinvestment
+                # Phase G+I: Compute effective order size
                 if hasattr(self, 'reinvestment_engine'):
                     status_emergency = False # Fallback check safely
                     if hasattr(self.state, 'status'):
@@ -289,13 +388,42 @@ class TradingBot:
                             current_free_equity=free_balance,
                             is_bot_stopped=(not self.state.running or self.state.manual_paused)
                         )
-                        # Push scaled configuration down to active strategies
                         initial = getattr(self.reinvestment_engine, '_initial_baseline', 1.0)
-                        if initial > 0:
-                            multiplier = dynamic_baseline / initial
-                            scaled_base_size = self.settings.grid.order_size_usdt * multiplier
-                            for strat in self.strategies.values():
-                                strat.config.order_size_usdt = scaled_base_size
+                        reinv_multiplier = (dynamic_baseline / initial) if initial > 0 else 1.0
+
+                        if self.settings.grid.enable_dynamic_order_sizing:
+                            # Phase I: percentage-based sizing.
+                            # Multiplier forced to 1.0 to prevent double-counting —
+                            # dynamic sizing already captures capital growth via free_balance.
+                            from core.dynamic_sizing import compute_dynamic_order_size
+                            effective_size = compute_dynamic_order_size(
+                                available_capital_usdt=free_balance,
+                                order_size_pct=self.settings.grid.order_size_pct_per_level,
+                                reinvestment_multiplier=1.0,
+                                min_order_usdt=self.settings.grid.dynamic_sizing_min_order_usdt,
+                                max_order_usdt=self.settings.grid.dynamic_sizing_max_order_usdt,
+                                fallback_fixed_size=self.settings.grid.order_size_usdt,
+                                enabled=True,
+                            )
+                            logger.info(
+                                "[DynamicSizing] Capital: {:.2f} | pct: {:.1f}% | "
+                                "Raw: {:.2f} | Final: {:.2f}/order | Mode: DYNAMIC",
+                                free_balance, self.settings.grid.order_size_pct_per_level * 100,
+                                free_balance * self.settings.grid.order_size_pct_per_level,
+                                effective_size,
+                            )
+                        else:
+                            # Legacy: fixed size × reinvestment multiplier (unchanged)
+                            effective_size = self.settings.grid.order_size_usdt * reinv_multiplier
+                            logger.info(
+                                "[DynamicSizing] Mode: FIXED ({:.2f}/order) | "
+                                "Reinvestment ×{:.2f} | Effective: {:.2f}/order",
+                                self.settings.grid.order_size_usdt, reinv_multiplier,
+                                effective_size,
+                            )
+
+                        for strat in self.strategies.values():
+                            strat.config.order_size_usdt = effective_size
                 
                 risk_decision = self.risk_manager.evaluate(
                     equity=equity, now=datetime.now(UTC),
@@ -329,8 +457,55 @@ class TradingBot:
                             "ERROR", "sync", f"{sym} sync failed: {result}",
                         )
 
+                # Step 4: Stale inventory exit check
+                stale_results = await asyncio.gather(
+                    *(mgr.check_stale_inverse_orders(
+                        exit_hours=self.settings.grid.inventory_exit_hours,
+                        exit_above_cost_pct=self.settings.grid.inventory_exit_above_cost_pct,
+                    ) for mgr in self.order_managers.values()),
+                    return_exceptions=True,
+                )
+                for sym, result in zip(self.order_managers.keys(), stale_results):
+                    if isinstance(result, Exception):
+                        logger.error("{}: stale inventory check failed: {}", sym, result)
+
+                # Step 4b: Inventory soft stop-loss (MEJORA-011)
+                if self.settings.grid.enable_inventory_stop_loss:
+                    for sym, mgr in self.order_managers.items():
+                        live_price = signals[sym].current_price if sym in signals else None
+                        if live_price is None:
+                            continue
+                        try:
+                            # FIX-4: use per-symbol threshold if configured, else global
+                            _stop_pct = (
+                                self.settings.grid.inventory_stop_loss_per_symbol.get(sym)
+                                or self.settings.grid.inventory_stop_loss_pct
+                            )
+                            triggered = await mgr.check_inventory_stop_loss(
+                                current_price=live_price,
+                                stop_pct=_stop_pct,
+                            )
+                            if triggered:
+                                await self._log_and_notify(
+                                    "WARNING", "risk",
+                                    f"{sym} inventory stop-loss executed at {live_price:.4f}",
+                                )
+                        except Exception as sl_err:
+                            logger.error("{}: inventory stop-loss check failed: {}", sym, sl_err)
+
+                # Step 4c: Hedge unhedged inventory (gate-free coverage SELLs)
+                await self._hedge_unhedged_inventory(signals=signals)
+
                 # Place new grids where needed
-                await self._place_new_grids(signals=signals, balance=free_balance)
+                # Phase J: skip placement during price shock pause; sync and
+                # fills (via WebSocket) continue running normally.
+                if not risk_decision.block_new_grids:
+                    await self._place_new_grids(signals=signals, balance=free_balance)
+                else:
+                    logger.info(
+                        "[iter {}] Grid placements skipped — price shock pause active ({})",
+                        iteration, risk_decision.reason,
+                    )
                 await self._persist_grid_states(signals)
 
                 # Metrics and heartbeat
@@ -373,7 +548,13 @@ class TradingBot:
         await self.shutdown(reason="loop_terminated")
 
     async def shutdown(self, reason: str = "manual_shutdown") -> None:
-        """Stop execution, cancel orders, persist final state and notify."""
+        """Stop execution, cancel entry orders (preserving SELL exits), persist final state.
+
+        Shutdown paths:
+          Ctrl+C / shutdown()  → cancel_entry_orders_only() — SELLs preserved, inventory hedged
+          PAUSE                → no orders touched (already correct, no change here)
+          emergency_stop()     → cancel_all() + market-sell inventory (handled separately below)
+        """
         if self._shutdown_event.is_set():
             return
         self._shutdown_event.set()
@@ -384,13 +565,16 @@ class TradingBot:
         except Exception as exc:
             logger.error("Stopping DB writer failed: {}", exc)
 
+        # Fix 1: cancel only BUY entry orders — preserve SELL exit orders so inventory
+        # remains hedged between shutdown and the next restart.
         try:
             await asyncio.gather(
-                *(mgr.cancel_all() for mgr in self.order_managers.values()),
+                *(mgr.cancel_entry_orders_only() for mgr in self.order_managers.values()),
                 return_exceptions=True,
             )
         except Exception as exc:
-            logger.error("Cancel all during shutdown failed: {}", exc)
+            logger.error("Cancel entry orders during shutdown failed: {}", exc)
+
         try:
             await self.exchange.stop_websockets()
         except Exception as exc:
@@ -400,10 +584,76 @@ class TradingBot:
         await self._log_and_notify("INFO", "bot", f"Bot stopped safely ({reason}).")
 
     async def emergency_stop(self, reason: str) -> None:
-        """Execute emergency shutdown flow and status update."""
+        """Execute emergency shutdown: cancel ALL orders + liquidate inventory.
+
+        Differs from shutdown() in two ways:
+          1. Cancels ALL orders (including SELL exits) — full position clear.
+          2. Executes market-sell for every open inventory position (if configured).
+        """
+        if self._shutdown_event.is_set():
+            return
+        self._shutdown_event.set()
+        self.state.running = False
+
         self.db.update_bot_state(status=BotStatus.EMERGENCY, message=reason)
         await self._log_and_notify("CRITICAL", "risk", f"Emergency stop: {reason}")
-        await self.shutdown(reason=reason)
+
+        try:
+            await asyncio.to_thread(self.db.stop_writer)
+        except Exception as exc:
+            logger.error("Stopping DB writer failed: {}", exc)
+
+        # Emergency: cancel ALL orders (including SELL exits — full unwind)
+        try:
+            await asyncio.gather(
+                *(mgr.cancel_all() for mgr in self.order_managers.values()),
+                return_exceptions=True,
+            )
+        except Exception as exc:
+            logger.error("Cancel all during emergency failed: {}", exc)
+
+        # Fix 3: market-sell all open inventory if configured
+        # MIN_MARKET_SELL_QTY: below this notional (~1 USDT equivalent) Bybit would
+        # reject the order. We use 0.00001 base-asset units as a safe floor; for BTC
+        # at $80K that's $0.80, well above Bybit's 1 USDT minimum notional.
+        _MIN_MARKET_SELL_QTY = 0.00001
+        if self.settings.risk.emergency_liquidate_inventory:
+            logger.critical("EMERGENCY: Liquidating all open inventory before shutdown.")
+            for symbol, manager in self.order_managers.items():
+                if manager._position_qty < _MIN_MARKET_SELL_QTY:
+                    if manager._position_qty > 0:
+                        logger.warning(
+                            "{}: position_qty {:.8f} below minimum sell qty — skipping market sell",
+                            symbol, manager._position_qty,
+                        )
+                    continue
+                if manager._position_qty > 1e-6:
+                    try:
+                        await manager.exchange.place_market_order(
+                            symbol=symbol,
+                            side="Sell",
+                            qty=manager._position_qty,
+                        )
+                        logger.critical(
+                            "{}: Emergency market-sell executed: {:.6f} units",
+                            symbol, manager._position_qty,
+                        )
+                        async with manager._lock:
+                            manager._position_qty = 0.0
+                            manager._avg_cost = 0.0
+                    except Exception as exc:
+                        logger.critical(
+                            "{}: EMERGENCY SELL FAILED: {}. Manual intervention required immediately.",
+                            symbol, exc,
+                        )
+                        # Continue with remaining symbols — do not re-raise
+
+        try:
+            await self.exchange.stop_websockets()
+        except Exception as exc:
+            logger.error("Stopping websockets failed: {}", exc)
+
+        await self._log_and_notify("CRITICAL", "bot", f"Emergency stop completed ({reason}).")
 
     # ── Strategy ──────────────────────────────────────────────────────
 
@@ -427,13 +677,103 @@ class TradingBot:
                     clean_klines = result.iloc[:-1]
                 else:
                     clean_klines = result
-                signals[symbol] = self.strategies[symbol].compute_signal(clean_klines)
+                signals[symbol] = self.strategies[symbol].compute_signal(
+                    clean_klines, grid_settings=self.settings.grid,
+                )
             except Exception as exc:
                 await self._log_and_notify(
                     "ERROR", "strategy",
                     f"{symbol} signal computation failed: {exc}",
                 )
         return signals
+
+    async def _hedge_unhedged_inventory(
+        self, signals: dict[str, StrategySignal],
+    ) -> None:
+        """Place coverage SELLs for inventory with no pending SELL orders.
+
+        This bypasses ADX/trend/volume gates — it is inventory protection,
+        not a new entry.  The price is set at avg_cost + sell_spacing so the
+        trade is breakeven-or-better.  If the SELL ages without filling,
+        check_stale_inverse_orders() will re-price it closer to cost basis
+        and inventory_stop_loss provides the hard floor.
+        """
+        for symbol, manager in self.order_managers.items():
+            # Guard 1: skip if no unhedged inventory
+            if not manager.has_unhedged_inventory():
+                continue
+
+            # Guard 2: skip if there are pending inverse retries
+            # (they have their own mechanism, avoid duplicates)
+            if manager._pending_inverse_retries:
+                continue
+
+            # Guard 3: skip if avg_cost is unknown (untracked position)
+            if manager._avg_cost <= 0 or manager._position_untracked:
+                logger.warning(
+                    "{}: unhedged inventory but avg_cost unknown — cannot hedge",
+                    symbol,
+                )
+                continue
+
+            # Guard 4: need a signal to validate exchange rules
+            signal = signals.get(symbol)
+            if signal is None:
+                continue
+
+            # Guard 5: check exchange minimums
+            try:
+                rules = await self.exchange.get_spot_symbol_rules(symbol)
+            except Exception as exc:
+                logger.warning("{}: hedge skipped — rules fetch failed: {}", symbol, exc)
+                continue
+
+            if manager._position_qty < float(rules.min_qty):
+                continue
+
+            # Calculate sell price: breakeven + spacing
+            spacing = manager._sell_spacing_pct or manager.default_spacing_pct
+            target_price = manager._avg_cost * (1 + spacing)
+
+            # Guard 6: check notional minimum
+            notional = manager._position_qty * target_price
+            if notional < 5.0:
+                continue
+
+            # Place the coverage SELL
+            timestamp_ms = str(int(datetime.now(UTC).timestamp() * 1000))
+            link_id = f"hedge-{symbol[:6]}-{timestamp_ms}"
+
+            try:
+                order_id = await self.exchange.place_limit_order(
+                    symbol=symbol,
+                    side="Sell",
+                    qty=manager._position_qty,
+                    price=target_price,
+                    orderLinkId=link_id,
+                )
+                manager._orders[order_id] = ManagedOrder(
+                    order_id=order_id,
+                    level_id=link_id,
+                    symbol=symbol,
+                    side="Sell",
+                    price=target_price,
+                    qty=manager._position_qty,
+                )
+                distance_pct = (target_price - signal.current_price) / signal.current_price
+                logger.info(
+                    "{}: HEDGE SELL placed at {:.2f} ({:+.2%} vs market {:.2f}) "
+                    "qty={:.6f} avg_cost={:.4f}",
+                    symbol, target_price, distance_pct,
+                    signal.current_price, manager._position_qty, manager._avg_cost,
+                )
+                await self._log_and_notify(
+                    "INFO", "hedge",
+                    f"{symbol} coverage SELL placed at {target_price:.2f} "
+                    f"for {manager._position_qty:.6f} units",
+                )
+            except Exception as exc:
+                logger.error("{}: hedge SELL failed: {}", symbol, exc)
 
     async def _place_new_grids(
         self, *, signals: dict[str, StrategySignal], balance: float,
@@ -443,12 +783,13 @@ class TradingBot:
         
         for symbol, signal in signals.items():
             manager = self.order_managers[symbol]
-            entry_orders = [o for o in manager.open_orders if not str(o.level_id).startswith("inverse-")]
+            entry_orders = [o for o in manager.open_orders if not str(o.level_id).startswith("inverse-") and not str(o.level_id).startswith("inv-")]
             
             if entry_orders:
-                # SG4: Integrate Advanced Grid Refresh (Phase B)
-                grid_state = self.db.get_latest_grid_state()
-                # Use current state specifically for the symbol (or fetch it if multiple)
+                # Phase H: Only evaluate grid refresh if master switch is ON
+                if not self.settings.grid.enable_grid_refresh:
+                    continue  # Defensive mode: no refresh, wait for fills
+
                 latest_states = {row.get("symbol", "").upper(): row for row in self.db.get_latest_grid_states()}
                 sym_state = latest_states.get(symbol)
                 
@@ -456,12 +797,16 @@ class TradingBot:
                     anchor_price = sym_state["grid_anchor_price"]
                     created_at = sym_state["grid_created_at"]
                     
+                    # Phase H: Use OR trigger mode with independent trigger switches
                     stale = is_grid_stale(
                         current_price=signal.current_price,
                         anchor_price=anchor_price,
                         grid_created_at=created_at,
                         atr_pct=signal.atr_pct,
                         cfg=self.refresh_cfg,
+                        trigger_mode="OR",
+                        enable_price_trigger=self.settings.grid.enable_refresh_price_trigger,
+                        enable_time_trigger=self.settings.grid.enable_refresh_time_trigger,
                     )
                     
                     refresh_state = self._refresh_states[symbol]
@@ -472,7 +817,10 @@ class TradingBot:
                             "[REFRESH] {} | {} | dev={:.2%} | age={:.1f}h", 
                             symbol, reason, stale.price_deviation_pct, stale.grid_age_hours
                         )
-                        await self._execute_grid_refresh(symbol, manager, refresh_state)
+                        await self._execute_grid_refresh(
+                            symbol, manager, refresh_state,
+                            signal=signal, balance=balance,
+                        )
                     else:
                         if stale.is_stale:
                             logger.debug("[REFRESH SKIP] {} | {}", symbol, reason)
@@ -485,22 +833,38 @@ class TradingBot:
             if cooldown_until and now < cooldown_until:
                 continue
             if signal.pause_new_grid:
-                # M10: ADX fallback — allow if bot is completely idle (no grids open)
-                if active_symbols:
-                    logger.debug("{}: skipped -- pause_new_grid=True (ADX too high)", symbol)
-                    continue
-                else:
-                    logger.info(
-                        "{}: ADX pause overridden — bot is idle, allowing fallback grid",
-                        symbol,
-                    )
-            # S5 fix: spot mode — only LONG bias grids (no naked sells)
-            if str(signal.trend_bias).lower() != "long":
                 logger.info(
-                    "SKIP {}: trend_bias={} (spot only allows LONG)",
+                    "{}: skipped -- ADX {:.1f} > threshold (trending market, no fallback)",
+                    symbol, signal.adx_value,
+                )
+                continue
+            # Step 5: Regime-based gate (replaces simple trend_bias check)
+            if signal.regime == MarketRegime.TRENDING_DOWN:
+                logger.info(
+                    "SKIP {}: regime={} (trending down, no new grids in spot)",
+                    symbol, signal.regime,
+                )
+                continue
+            # S5 fix: spot mode — EMA backup filter (regime-aware)
+            # RANGING: allow LONG and NEUTRAL (grid works in sideways markets)
+            # TRANSITIONAL: require LONG or NEUTRAL (block SHORT only)
+            # TRENDING_UP: any bias allowed (already passed regime gate above)
+            _bias = str(signal.trend_bias).lower()
+            if signal.regime == MarketRegime.TRANSITIONAL and _bias not in ("long", "neutral"):
+                logger.info(
+                    "SKIP {}: regime=TRANSITIONAL trend_bias={} (only LONG/NEUTRAL allowed)",
                     symbol, signal.trend_bias,
                 )
                 continue
+
+            # Step 6: Volume ratio filter
+            if self.settings.grid.volume_filter_enabled:
+                if signal.volume_ratio < self.settings.grid.min_volume_ratio_filter:
+                    logger.info(
+                        "{}: low volume ratio {:.2f} < {:.2f} — skipping placement",
+                        symbol, signal.volume_ratio, self.settings.grid.min_volume_ratio_filter,
+                    )
+                    continue
 
             # S2: correlation filter
             if signal.close_history is not None and active_symbols:
@@ -508,7 +872,10 @@ class TradingBot:
                 for active_sym in active_symbols:
                     active_sig = signals.get(active_sym)
                     if active_sig and active_sig.close_history is not None:
-                        corr = signal.close_history.corr(active_sig.close_history)
+                        if len(signal.close_history) != len(active_sig.close_history):
+                            continue
+                        _corr_raw = np.corrcoef(signal.close_history, active_sig.close_history)[0, 1]
+                        corr = float(_corr_raw) if not np.isnan(_corr_raw) else 0.0
                         if corr > 0.8:
                             is_correlated = True
                             await self._log_and_notify(
@@ -606,7 +973,22 @@ class TradingBot:
 
         candidates.sort(key=lambda item: item[0], reverse=True)
 
-        available_balance = balance
+        # BUG-16: Bybit UTA reports availableToWithdraw without subtracting USDC
+        # locked in open spot BUY limit orders. Compute locked capital from our
+        # own order tracker (which is always accurate) and subtract it so that
+        # multi-pair placement doesn't over-allocate the same USDC twice.
+        locked_in_open_buys = sum(
+            o.qty * o.price
+            for mgr in self.order_managers.values()
+            for o in mgr.open_orders
+            if str(o.side).upper() == "BUY"
+        )
+        available_balance = max(0.0, balance - locked_in_open_buys)
+        if locked_in_open_buys > 0:
+            logger.debug(
+                "[Capital] free_balance={:.2f} — locked_in_open_buys={:.2f} → available={:.2f}",
+                balance, locked_in_open_buys, available_balance,
+            )
         selected: list[tuple[str, StrategySignal, float]] = []
         active_count = len(active_symbols)
         new_selections = 0
@@ -630,7 +1012,7 @@ class TradingBot:
 
             if required > available_balance:
                 # Stage 1: Absolute minimum viability
-                min_threshold = rules.min_qty * live_price * MIN_VIABLE_LEVELS
+                min_threshold = float(rules.min_qty) * live_price * MIN_VIABLE_LEVELS
                 if available_balance < min_threshold:
                     logger.debug(
                         f"[Capital] Skipping {symbol}: available={available_balance:.2f}, "
@@ -648,7 +1030,7 @@ class TradingBot:
                     viable = False
                 for lvl in scaled_signal.levels:
                     # check actual required notional & qty min rules
-                    if lvl.qty * live_price < rules.min_notional or lvl.qty < rules.min_qty:
+                    if lvl.qty * live_price < 5.0 or lvl.qty < float(rules.min_qty):
                         viable = False
                         break
                 if scaled_signal.grid_spread_pct < (2 * TAKER_FEE_RATE * MINIMUM_PROFIT_BUFFER):
@@ -668,17 +1050,47 @@ class TradingBot:
                 signal = scaled_signal
                 required = available_balance
 
-            # S3: liquidity pre-check
+            # S3: liquidity pre-check (Step 2: per-symbol spread limits)
             try:
-                ob = await self.exchange.get_orderbook(symbol=symbol)
-                if ob["spread_pct"] > 0.005 or ob["bid_depth_usdt"] < required * 3:
+                liq_cfg = self.settings.grid
+                ob = await self.exchange.get_orderbook(
+                    symbol=symbol, limit=liq_cfg.liquidity_orderbook_levels
+                )
+                # Step 2: Use per-symbol spread limit instead of global
+                spread_limit = liq_cfg.get_spread_limit(symbol)
+                spread_ok = ob["spread_pct"] <= spread_limit
+                depth_ok = ob["bid_depth_usdt"] >= required * liq_cfg.liquidity_min_depth_multiplier
+                if not spread_ok or not depth_ok:
+                    # Track consecutive spread failures
+                    if not spread_ok:
+                        self._spread_failures[symbol] = self._spread_failures.get(symbol, 0) + 1
+                        if self._spread_failures[symbol] >= liq_cfg.spread_consecutive_failures_alert:
+                            logger.warning(
+                                "{}: spread above limit for {} consecutive cycles — possible liquidity anomaly",
+                                symbol, self._spread_failures[symbol],
+                            )
+                    manager = self.order_managers[symbol]
+                    is_orderless = not manager.open_orders
+                    level = "ERROR" if is_orderless else "WARNING"
                     await self._log_and_notify(
-                        "WARNING", "strategy",
-                        f"{symbol} low liquidity spread={ob['spread_pct']:.4f}, depth={ob['bid_depth_usdt']:.1f}",
+                        level, "strategy",
+                        f"{symbol} liquidity check failed — "
+                        f"spread={ob['spread_pct']*100:.4f}% (limit={spread_limit*100:.2f}%) "
+                        f"depth={ob['bid_depth_usdt']:.1f} USDT (need={required*liq_cfg.liquidity_min_depth_multiplier:.0f}) "
+                        f"{'⚠ BOT IS ORDERLESS' if is_orderless else ''}",
                     )
                     continue
+                else:
+                    self._spread_failures[symbol] = 0  # Reset on success
             except Exception as exc:
                 logger.error("{}: orderbook check failed: {}", symbol, exc)
+                continue
+
+            # Step 3: Inventory cap gate
+            if not self._check_inventory_gate(
+                symbol, self.order_managers[symbol],
+                live_prices.get(symbol, signal.current_price),
+            ):
                 continue
 
             selected.append((symbol, signal, score))
@@ -726,30 +1138,16 @@ class TradingBot:
                     manager.grid_anchor_price = signal.current_price
                     manager.grid_created_at = datetime.now(UTC)
                     
-                # R5: set exchange-side hard stop-loss below lowest buy level
-                if placed:
-                    buy_orders = [o for o in placed if o.side == OrderSide.BUY]
-                    if buy_orders:
-                        lowest_price = min(o.price for o in buy_orders)
-                        total_qty = sum(o.qty for o in buy_orders)
-                        stop_price = lowest_price * (1 - self.settings.risk.max_drawdown_pct * 2)
-                        try:
-                            await self.exchange.set_stop_loss_hard(
-                                symbol=symbol,
-                                trigger_price=stop_price,
-                                qty=total_qty,
-                            )
-                        except Exception as sl_exc:
-                            await self._log_and_notify(
-                                "WARNING", "risk",
-                                f"{symbol} hard SL placement failed: {sl_exc}",
-                            )
+                # R5: Exchange-side hard stop-loss disabled — Bybit Spot conditional orders
+                # lock the base asset, preventing inverse SELL limit orders from being placed
+                # (ErrCode 170131). Protection is provided by check_inventory_stop_loss()
+                # which runs every main loop cycle via the software stop-loss path.
             except Exception as exc:
                 # M4: clean up partial orders on the exchange
                 try:
                     await manager.cancel_all()
-                except Exception:
-                    pass
+                except Exception as cancel_exc:
+                    logger.warning("{}: cancel_all failed during placement cleanup: {}", symbol, cancel_exc)
                 # M4: detect price-limit errors (Bybit 170193) and apply longer cooldown
                 exc_str = str(exc)
                 if "170193" in exc_str or "price limit" in exc_str.lower():
@@ -759,6 +1157,7 @@ class TradingBot:
                 self._placement_cooldown_until[symbol] = datetime.now(UTC) + timedelta(
                     seconds=cooldown_secs,
                 )
+                logger.opt(exception=exc).error("{}: grid placement failed: {} — type={}", symbol, exc, type(exc).__name__)
                 await self._log_and_notify(
                     "ERROR", "order_manager",
                     f"{symbol} grid placement failed (cooldown {cooldown_secs}s): {exc}",
@@ -784,7 +1183,8 @@ class TradingBot:
             try:
                 quote_bal = await self.exchange.get_balance(self.quote_coin)
                 return quote_bal
-            except Exception:
+            except Exception as fb_exc:
+                logger.warning("_compute_portfolio_equity: fallback balance fetch failed: {}", fb_exc)
                 return 0.0
 
         total = balances.get(self.quote_coin, 0.0)
@@ -814,6 +1214,25 @@ class TradingBot:
             await self.notifier.send_daily_summary(payload)
         except Exception as exc:
             logger.error("Daily summary failed: {}", exc)
+
+    def _check_inventory_gate(
+        self, symbol: str, manager: OrderManager, current_price: float,
+    ) -> bool:
+        """Block new BUY grids if inventory exceeds max ratio of allocated capital."""
+        allocated_capital = self.settings.grid.capital_usdt / max(1, len(self.symbols))
+        if allocated_capital <= 0:
+            return True
+        position_value = manager._position_qty * current_price
+        ratio = position_value / allocated_capital
+        max_ratio = self.settings.grid.max_inventory_ratio
+        if ratio >= max_ratio:
+            logger.warning(
+                "{}: inventory gate ACTIVE — position ${:.2f} = {:.1%} of "
+                "allocated ${:.2f} (limit: {:.1%})",
+                symbol, position_value, ratio, allocated_capital, max_ratio,
+            )
+            return False
+        return True
 
     @staticmethod
     def _round_down_qty(value: Decimal, step: Decimal) -> Decimal:
@@ -858,39 +1277,217 @@ class TradingBot:
                 self.db.save_grid_state(state)
         await asyncio.to_thread(_sync_persist)
 
-    async def _execute_grid_refresh(self, symbol: str, manager: OrderManager, refresh_state: RefreshState) -> None:
+    async def _execute_grid_refresh(
+        self,
+        symbol: str,
+        manager: OrderManager,
+        refresh_state: RefreshState,
+        *,
+        signal: StrategySignal | None = None,
+        balance: float = 0.0,
+    ) -> None:
         """
-        Safely cancel stale entry orders and allow grid re-creation next cycle.
-        Aborts if inventory is unhedged. Updates refresh_state in place.
+        Phase H: Enhanced grid refresh with 5 safety gates.
+
+        Sequence: snapshot → gates → cancel (abort-safe) → state update.
+        If any gate fails, the refresh is blocked and logged.
+        If cancel fails mid-way, the refresh aborts with a failure cooldown.
         """
+        # ── 0. Pre-flight: unhedged inventory hard block ──────────────
         if manager.has_unhedged_inventory():
             logger.warning("[REFRESH ABORT] {} — unhedged inventory, skipping cancel", symbol)
             refresh_state.refresh_fail_count += 1
             return
 
+        # ── 1. Pre-Execution Snapshot ─────────────────────────────────
+        open_buys = manager.get_open_buy_count()
+        snapshot = {
+            "open_buy_count": open_buys,
+            "inventory_qty": manager._position_qty,
+            "free_balance": balance,
+            "timestamp": datetime.now(UTC).isoformat(),
+            "anchor_price": manager.grid_anchor_price,
+        }
+
+        # ── 2. Evaluate Safety Gates ──────────────────────────────────
+        if signal is not None:
+            current_price = signal.current_price
+            adx_value = signal.adx_value
+            trend_bias = str(signal.trend_bias)
+        else:
+            current_price = self.state.last_price
+            adx_value = 0.0
+            trend_bias = "neutral"
+
+        # Compute inventory ratio
+        inventory_value = manager._position_qty * current_price
+        allocated_capital = self.settings.grid.capital_usdt / max(1, len(self.symbols))
+        inventory_ratio = inventory_value / allocated_capital if allocated_capital > 0 else 0.0
+
+        # Compute time since last refresh
+        now = datetime.now(UTC)
+        if refresh_state.last_refresh_at:
+            time_since_last = (now - refresh_state.last_refresh_at).total_seconds()
+        else:
+            time_since_last = float(self.settings.grid.refresh_cooldown_seconds + 1)
+
+        # Compute price move since last refresh
+        if refresh_state.last_refresh_price and refresh_state.last_refresh_price > 0:
+            price_move_pct = abs(current_price - refresh_state.last_refresh_price) / refresh_state.last_refresh_price
+        else:
+            price_move_pct = 1.0  # First refresh: always passes min-move
+
+        all_passed, gate_results = evaluate_safety_gates(
+            adx_value=adx_value,
+            trend_bias=trend_bias,
+            inventory_ratio=inventory_ratio,
+            open_buy_count=open_buys,
+            time_since_last_refresh_s=time_since_last,
+            price_move_since_last_pct=price_move_pct,
+            adx_block_threshold=self.settings.grid.refresh_adx_block_threshold,
+            max_inventory_ratio=self.settings.grid.refresh_max_inventory_ratio,
+            cooldown_seconds=self.settings.grid.refresh_cooldown_seconds,
+            min_move_pct=self.settings.grid.refresh_min_move_pct,
+            skip_if_orders_above=self.settings.grid.refresh_skip_if_orders_above,
+        )
+
+        # Log every gate decision
+        for g in gate_results:
+            logger.debug(
+                "[REFRESH GATE] {} | {} | passed={} | value={:.4f} | threshold={:.4f}",
+                symbol, g.gate_name, g.passed, g.value, g.threshold,
+            )
+
+        if not all_passed:
+            blocked_gate = next(g for g in gate_results if not g.passed)
+            logger.info(
+                "[REFRESH BLOCKED] {} — {} ({})",
+                symbol, blocked_gate.gate_name, blocked_gate.reason,
+            )
+            return
+
+        # ── 3. All gates passed — Execute cancel ─────────────────────
+        logger.info(
+            "[REFRESH] {} — All gates PASSED. Executing refresh. "
+            "ADX={:.1f} ({}) | Inventory={:.1%} | Move={:.2%} | BuyOrders={}",
+            symbol, adx_value, trend_bias, inventory_ratio,
+            price_move_pct, open_buys,
+        )
+
         refresh_state.refresh_in_progress = True
         try:
-            cancelled = await manager.cancel_entry_orders_only()
+            cancelled = await manager.cancel_entry_orders_only(abort_on_error=True)
             logger.info("[REFRESH OK] {} — cancelled {} entry orders", symbol, cancelled)
-            
-            refresh_state.last_refresh_at = datetime.now(UTC)
+
+            # ── 4. Update refresh state ───────────────────────────────
+            refresh_state.last_refresh_at = now
+            refresh_state.last_refresh_price = current_price
             refresh_state.stale_cycle_count = 0
             refresh_state.refresh_fail_count = 0
             refresh_state.refresh_count_today += 1
-            
-        except Exception as e:
-            logger.error("[REFRESH ERROR] {} — {}", symbol, e, exc_info=True)
+
+            # Clear grid anchor so main loop places a fresh grid next cycle
+            manager.grid_anchor_price = None
+            manager.grid_created_at = None
+
+            # ── 5. Persist GRID_REFRESH event for analytics ──────────
+            await self._log_event(
+                "INFO", "grid_refresh",
+                f"GRID_REFRESH {symbol}",
+                payload={
+                    "symbol": symbol,
+                    "trigger_reason": "safety_gated_refresh",
+                    "old_anchor_price": snapshot.get("anchor_price"),
+                    "current_price": current_price,
+                    "deviation_pct": round(abs(current_price - (snapshot.get("anchor_price") or current_price)) / max(current_price, 1e-8), 4),
+                    "inventory_ratio": round(inventory_ratio, 4),
+                    "adx_value": round(adx_value, 2),
+                    "trend_bias": trend_bias,
+                    "cancelled_orders": cancelled,
+                    "snapshot": snapshot,
+                },
+            )
+
+        except Exception as exc:
+            logger.error("[REFRESH ERROR] {} — {}", symbol, exc, exc_info=True)
             refresh_state.refresh_fail_count += 1
+            # Phase H: Failure cooldown — block any placement for this symbol
+            self._placement_cooldown_until[symbol] = now + timedelta(
+                seconds=self.settings.grid.refresh_failure_cooldown_seconds,
+            )
+            await self._log_event(
+                "ERROR", "grid_refresh",
+                f"GRID_REFRESH_FAILED {symbol}: {exc}",
+                payload={"snapshot": snapshot, "error": str(exc)},
+            )
         finally:
             refresh_state.refresh_in_progress = False
 
     # ── Risk ──────────────────────────────────────────────────────────
 
     async def _handle_risk_decision(self, decision: RiskDecision) -> None:
+        # Persist latest risk metrics for the dashboard (runs on every call, cheap upsert)
+        try:
+            self.db.set_runtime_config("risk_status", self.risk_manager.get_risk_status())
+        except Exception as _rs_err:
+            logger.debug("[risk] Failed to persist risk status: {}", _rs_err)
+
+        # ── Emergency stop (drawdown, daily loss, or sustained price shock) ──
         if decision.emergency_stop:
+            # Classify event type and extract trigger value from reason string
+            try:
+                trigger = float(decision.reason.split(":")[1]) if ":" in decision.reason else 0.0
+            except (ValueError, IndexError):
+                trigger = 0.0
+            if "price_shock_sustained" in decision.reason:
+                cb_type, cb_threshold = "price_shock_escalation", self.risk_manager.max_hourly_move_pct
+            elif "max_drawdown" in decision.reason:
+                cb_type, cb_threshold = "max_drawdown", self.risk_manager.max_drawdown_pct
+            else:
+                cb_type, cb_threshold = "max_daily_loss", self.risk_manager.max_daily_loss_pct
+            try:
+                self.db.log_circuit_breaker(CircuitBreakerEvent(
+                    timestamp=datetime.now(UTC),
+                    breaker_type=cb_type,
+                    trigger_value=trigger,
+                    threshold=cb_threshold,
+                    action_taken="emergency_stop",
+                    details=decision.reason,
+                ))
+            except Exception as _cb_err:
+                logger.warning("[risk] Failed to log circuit breaker event: {}", _cb_err)
+
+            # Distinguish sustained price shock escalation from other emergencies
+            if "price_shock_sustained" in decision.reason and self.settings.risk.price_shock_notify_telegram:
+                await self._log_and_notify(
+                    "CRITICAL", "risk",
+                    "EMERGENCY STOP — Sustained Extreme Volatility\n\n"
+                    "Price volatility has persisted beyond the escalation limit.\n"
+                    "All trading halted. Manual restart required.\n"
+                    "Check market conditions before restarting.",
+                )
             await self.emergency_stop(decision.reason)
             return
+
+        # ── Daily loss pause (allow_trading=False + paused_until set) ────────
         if not decision.allow_trading and decision.paused_until:
+            # Log circuit breaker event only on initial trigger (not during ongoing pause)
+            if "max_daily_loss_triggered" in decision.reason:
+                try:
+                    trigger = float(decision.reason.split(":")[1]) if ":" in decision.reason else 0.0
+                except (ValueError, IndexError):
+                    trigger = 0.0
+                try:
+                    self.db.log_circuit_breaker(CircuitBreakerEvent(
+                        timestamp=datetime.now(UTC),
+                        breaker_type="daily_loss",
+                        trigger_value=trigger,
+                        threshold=self.risk_manager.max_daily_loss_pct,
+                        action_taken="pause_24h",
+                        details=decision.reason,
+                    ))
+                except Exception as _cb_err:
+                    logger.warning("[risk] Failed to log circuit breaker event: {}", _cb_err)
             self.db.update_bot_state(
                 status=BotStatus.PAUSED,
                 message=decision.reason,
@@ -901,6 +1498,59 @@ class TradingBot:
                 f"Trading paused until {decision.paused_until.isoformat()} "
                 f"({decision.reason})",
             )
+
+        # ── Phase J: price shock pause/resume transition notifications ────────
+        if decision.price_shock_paused and not self._price_shock_was_paused:
+            # Pause just activated — log event and send notification
+            try:
+                move_pct = float(decision.reason.split(":")[-1])
+            except (ValueError, IndexError):
+                move_pct = 0.0
+            try:
+                self.db.log_circuit_breaker(CircuitBreakerEvent(
+                    timestamp=datetime.now(UTC),
+                    breaker_type="price_shock_pause",
+                    trigger_value=move_pct,
+                    threshold=self.risk_manager.max_hourly_move_pct,
+                    action_taken="block_new_grids",
+                    details=decision.reason,
+                ))
+            except Exception as _cb_err:
+                logger.warning("[risk] Failed to log circuit breaker event: {}", _cb_err)
+            if self.settings.risk.price_shock_notify_telegram:
+                threshold = self.settings.risk.max_price_move_1h_pct
+                await self._log_and_notify(
+                    "INFO", "risk",
+                    f"TRADING PAUSED — Price Volatility\n\n"
+                    f"Price moved {move_pct:.1%} in the last hour "
+                    f"(limit: {threshold:.0%}).\n"
+                    f"New grid placements paused until market stabilizes.\n"
+                    f"Existing orders remain active.\n"
+                    f"The bot will resume automatically when volatility drops.\n"
+                    f"No action needed.",
+                )
+        elif not decision.price_shock_paused and self._price_shock_was_paused:
+            # Pause just resolved — log event and send resume notification
+            try:
+                self.db.log_circuit_breaker(CircuitBreakerEvent(
+                    timestamp=datetime.now(UTC),
+                    breaker_type="price_shock_resume",
+                    trigger_value=0.0,
+                    threshold=self.risk_manager.max_hourly_move_pct,
+                    action_taken="resume_grids",
+                    details="auto_resume_after_stabilization",
+                ))
+            except Exception as _cb_err:
+                logger.warning("[risk] Failed to log circuit breaker event: {}", _cb_err)
+            if self.settings.risk.price_shock_notify_telegram:
+                await self._log_and_notify(
+                    "INFO", "risk",
+                    "TRADING RESUMED — Market Stabilized\n\n"
+                    "Price volatility normalized. "
+                    "Grid placements resuming automatically.",
+                )
+
+        self._price_shock_was_paused = decision.price_shock_paused
 
     # ── WebSocket Handlers ────────────────────────────────────────────
 
@@ -1070,8 +1720,10 @@ async def run_bot() -> None:
         retention="14 days",
         level=settings.log_level,
         enqueue=True,
+        backtrace=True,
+        diagnose=True,
     )
-    logger.add(lambda msg: print(msg, end=""), level=settings.log_level)
+    logger.add(lambda msg: print(msg, end=""), level=settings.log_level, backtrace=True, diagnose=True)
 
     db = Database(settings.db_full_path)
     db.init_schema()

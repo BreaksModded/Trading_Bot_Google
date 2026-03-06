@@ -104,6 +104,16 @@ class GridState:
     grid_created_at: datetime | None = None
     grid_anchor_price: float | None = None
     pending_retries: list[dict[str, Any]] = field(default_factory=list)
+    # Phase G: asymmetric spacing persistence
+    buy_spacing_pct: float = 0.0
+    sell_spacing_pct: float = 0.0
+    # Phase H: refresh metadata
+    last_refresh_price: float | None = None
+    refresh_count: int = 0
+    original_anchor_price: float | None = None
+    # Bug 3: Cost basis persistence
+    position_qty: float = 0.0
+    avg_cost: float = 0.0
 
 
 # ── Performance Models ────────────────────────────────────────────────

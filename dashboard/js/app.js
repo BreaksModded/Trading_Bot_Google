@@ -12,6 +12,7 @@ const APP = {
     charts: {},
     currentPanel: 'overview',
     selectedSymbol: 'Overview',
+    selectedInterval: '60',
     activeSymbolsCache: [],
     username: localStorage.getItem('bot_user') || null,
     password: localStorage.getItem('bot_pass') || null,
@@ -190,6 +191,35 @@ function setupButtons() {
     // Auth
     const btnLogout = document.getElementById('btn-logout');
     if (btnLogout) btnLogout.addEventListener('click', logout);
+
+    // Performance panel — period selector
+    document.querySelectorAll('#perf-period-selector .period-btn').forEach(btn => {
+        btn.addEventListener('click', () => {
+            document.querySelectorAll('#perf-period-selector .period-btn').forEach(b => b.classList.remove('active'));
+            btn.classList.add('active');
+            loadPerformance(btn.dataset.period);
+        });
+    });
+
+    // Trading panel — kline interval selector (1M/5M/15M/1H/4H)
+    document.querySelectorAll('#trading-period-selector .period-btn').forEach(btn => {
+        btn.addEventListener('click', () => {
+            document.querySelectorAll('#trading-period-selector .period-btn').forEach(b => b.classList.remove('active'));
+            btn.classList.add('active');
+            APP.selectedInterval = btn.dataset.interval;
+            loadTrades();
+        });
+    });
+
+    // Overview panel — equity chart period selector (7D/30D/90D)
+    document.querySelectorAll('#equity-period-selector .period-btn').forEach(btn => {
+        btn.addEventListener('click', () => {
+            document.querySelectorAll('#equity-period-selector .period-btn').forEach(b => b.classList.remove('active'));
+            btn.classList.add('active');
+            const daysMap = { '7d': 7, '30d': 30, '90d': 90 };
+            loadEquityChart(daysMap[btn.dataset.period] || 30);
+        });
+    });
 }
 
 function setupSliders() {
@@ -372,6 +402,44 @@ function initCharts() {
             }
         }).observe(priceContainer);
     }
+
+    // Daily PnL histogram (performance panel)
+    const dailyPnlContainer = document.getElementById('daily-pnl-chart');
+    if (dailyPnlContainer && typeof LightweightCharts !== 'undefined') {
+        const chart = LightweightCharts.createChart(dailyPnlContainer, chartOptions(dailyPnlContainer));
+        APP.charts.dailyPnl = chart.addHistogramSeries({
+            priceFormat: { type: 'price', precision: 2, minMove: 0.01 },
+            color: '#00c087',
+        });
+        new ResizeObserver(() => {
+            if (dailyPnlContainer.clientWidth > 0) {
+                chart.applyOptions({
+                    width: dailyPnlContainer.clientWidth,
+                    height: dailyPnlContainer.clientHeight || 280,
+                });
+            }
+        }).observe(dailyPnlContainer);
+    }
+
+    // Equity evolution chart (performance panel)
+    const perfEqContainer = document.getElementById('perf-equity-chart');
+    if (perfEqContainer && typeof LightweightCharts !== 'undefined') {
+        const chart = LightweightCharts.createChart(perfEqContainer, chartOptions(perfEqContainer));
+        APP.charts.perfEquity = chart.addAreaSeries({
+            topColor: 'rgba(59, 130, 246, 0.3)',
+            bottomColor: 'rgba(59, 130, 246, 0.01)',
+            lineColor: '#3b82f6',
+            lineWidth: 2,
+        });
+        new ResizeObserver(() => {
+            if (perfEqContainer.clientWidth > 0) {
+                chart.applyOptions({
+                    width: perfEqContainer.clientWidth,
+                    height: perfEqContainer.clientHeight || 280,
+                });
+            }
+        }).observe(perfEqContainer);
+    }
 }
 
 function chartOptions(container) {
@@ -409,6 +477,33 @@ async function loadEquityChart(days = 30) {
     }
 }
 
+async function loadPerfCharts() {
+    // Daily PnL histogram
+    if (APP.charts.dailyPnl) {
+        const pnlData = await api('/performance/daily-pnl?days=30');
+        if (pnlData && pnlData.data && pnlData.data.length > 0) {
+            const bars = pnlData.data.map(d => ({
+                time: d.date,
+                value: d.pnl,
+                color: d.pnl >= 0 ? '#00c087' : '#ef4444',
+            }));
+            APP.charts.dailyPnl.setData(bars);
+        }
+    }
+
+    // Performance equity curve
+    if (APP.charts.perfEquity) {
+        const eqData = await api('/performance/equity?days=30');
+        if (eqData && eqData.points && eqData.points.length > 0) {
+            const series = eqData.points.map(p => ({
+                time: new Date(p.timestamp).getTime() / 1000,
+                value: p.capital,
+            }));
+            APP.charts.perfEquity.setData(series);
+        }
+    }
+}
+
 // ── Panel Loaders ────────────────────────────────────────────
 async function loadTrades() {
     // Update chart title dynamically immediately
@@ -419,7 +514,8 @@ async function loadTrades() {
 
     // Load price chart
     const klinesParams = APP.selectedSymbol !== 'Overview' ? `&symbol=${APP.selectedSymbol}` : '';
-    const klines = await api(`/trading/klines?interval=60&limit=200${klinesParams}`);
+    const interval = APP.selectedInterval || '60';
+    const klines = await api(`/trading/klines?interval=${interval}&limit=200${klinesParams}`);
     if (APP.charts.price) {
         if (klines && klines.klines && klines.klines.length > 0) {
             const series = klines.klines.map(k => {
@@ -462,17 +558,49 @@ async function loadTrades() {
 async function loadPerformance(period = '7d') {
     const data = await api(`/performance/metrics?period=${period}`);
     if (!data) return;
+
+    // ── KPI cards ────────────────────────────────────────────
     setText('perf-total-trades', data.total_trades || 0);
     setPnlText('perf-net-pnl', data.pnl_total || 0);
     setText('perf-win-rate', `${(data.win_rate || 0).toFixed(1)}%`);
     setText('perf-profit-factor', (data.profit_factor || 0).toFixed(2));
     setText('perf-sharpe', (data.sharpe_ratio || 0).toFixed(2));
     setText('perf-max-dd', `${(data.drawdown_pct || 0).toFixed(2)}%`);
+
+    // ── Detailed stats grid ───────────────────────────────────
+    const statsEl = document.getElementById('perf-detailed-stats');
+    if (statsEl) {
+        const avgPnl = data.average_pnl || 0;
+        const pnlDaily = data.pnl_daily || 0;
+        const winColor = avgPnl >= 0 ? 'var(--green)' : 'var(--red)';
+        const dailyColor = pnlDaily >= 0 ? 'var(--green)' : 'var(--red)';
+        statsEl.innerHTML = `
+            <div class="stat-item"><span class="stat-label">Operaciones Ejecutadas</span><span class="stat-value">${data.total_executions || 0}</span></div>
+            <div class="stat-item"><span class="stat-label">Ganadoras / Perdedoras</span><span class="stat-value">${data.winners || 0} / ${data.losers || 0}</span></div>
+            <div class="stat-item"><span class="stat-label">PnL Medio / Operación</span><span class="stat-value" style="color:${winColor}">${avgPnl >= 0 ? '+' : ''}$${avgPnl.toFixed(4)}</span></div>
+            <div class="stat-item"><span class="stat-label">Beneficio Bruto</span><span class="stat-value positive">+$${(data.gross_profit || 0).toFixed(2)}</span></div>
+            <div class="stat-item"><span class="stat-label">Pérdida Bruta</span><span class="stat-value negative">-$${(data.gross_loss || 0).toFixed(2)}</span></div>
+            <div class="stat-item"><span class="stat-label">PnL Últimas 24h</span><span class="stat-value" style="color:${dailyColor}">${pnlDaily >= 0 ? '+' : ''}$${pnlDaily.toFixed(2)}</span></div>
+        `;
+    }
+
+    // ── Charts (always show last 30 days for visual context) ─
+    loadPerfCharts();
 }
 
 async function loadRiskData() {
     const data = await api('/logs/risk-status');
     if (!data || data.error) return;
+
+    // Handle bot not running (no risk data persisted yet)
+    if (data.available === false) {
+        const alertsContainer = document.getElementById('risk-alerts-container');
+        if (alertsContainer) {
+            alertsContainer.innerHTML = `<div style="background:rgba(100,116,139,0.1); border:1px solid rgba(100,116,139,0.4); color:var(--text-muted); padding:12px; border-radius:6px; font-weight:600;">ℹ️ Risk data unavailable — bot is not running.</div>`;
+        }
+        return;
+    }
+
     setText('risk-drawdown', `${(data.drawdown_pct || 0).toFixed(2)}%`);
     setText('risk-daily-loss', `${(data.daily_loss_pct || 0).toFixed(2)}%`);
     setText('risk-dd-limit', `${data.drawdown_limit_pct || 15}%`);
@@ -480,7 +608,6 @@ async function loadRiskData() {
     updateProgressBar('risk-dd-bar', data.drawdown_pct, data.drawdown_limit_pct);
     updateProgressBar('risk-daily-bar', data.daily_loss_pct, data.daily_loss_limit_pct);
 
-    // Mocking price move 1h logic gracefully falling back to 0 if not present
     const priceMove1h = data.price_move_1h || 0;
     const priceMoveLimit = data.price_move_limit_pct || 8;
     setText('risk-price-move', `${priceMove1h.toFixed(2)}%`);
@@ -496,6 +623,9 @@ async function loadRiskData() {
         }
         if (data.daily_loss_pct > (data.daily_loss_limit_pct * 0.8)) {
             alertsHtml += `<div style="background:rgba(239, 68, 68, 0.1); border:1px solid var(--red); color:var(--red); padding:12px; border-radius:6px; font-weight:600;">⚠️ ALERTA: Pérdida diaria cerca del máximo admitido (Circuit Breaker).</div>`;
+        }
+        if (data.price_shock_paused) {
+            alertsHtml += `<div style="background:rgba(245, 158, 11, 0.1); border:1px solid #f59e0b; color:#f59e0b; padding:12px; border-radius:6px; font-weight:600;">⏸ PAUSA DE VOLATILIDAD: Nuevos grids bloqueados. Órdenes existentes activas. Reanudación automática.</div>`;
         }
         if (alertsHtml === '') {
             alertsHtml = `<div style="background:rgba(0, 192, 135, 0.1); border:1px solid var(--green); color:var(--green); padding:12px; border-radius:6px; font-weight:600;">✅ Sistema Estable: El bot está gestionando el riesgo automáticamente.</div>`;
@@ -514,7 +644,7 @@ async function loadRiskData() {
           <td>${new Date(e.timestamp).toLocaleString()}</td>
           <td><span class="tag" style="background:var(--red-dim);color:var(--red)">${e.breaker_type}</span></td>
           <td>${(e.trigger_value * 100).toFixed(2)}%</td>
-          <td>${(e.threshold_value * 100).toFixed(2)}%</td>
+          <td>${(e.threshold * 100).toFixed(2)}%</td>
           <td>${e.action_taken}</td>
         </tr>
       `).join('');
@@ -694,6 +824,8 @@ function updateGridPanel(data) {
             const adx = inds.adx || 0;
             const atrPct = (inds.atr_pct || 0) * 100;
             const trend = inds.trend; // 'long', 'short', 'neutral'
+            const rsi = inds.rsi !== undefined && inds.rsi !== null ? parseFloat(inds.rsi) : null;
+            const regime = inds.regime || 'transitional';
 
             let volatilityStr = 'baja';
             if (atrPct > 4) volatilityStr = 'extrema';
@@ -709,17 +841,32 @@ function updateGridPanel(data) {
             if (trend === 'long') { trendStr = 'Alcista'; trendColor = 'var(--green)'; }
             else if (trend === 'short') { trendStr = 'Bajista'; trendColor = 'var(--red)'; }
 
+            const regimeMap = {
+                'ranging': 'Lateral (Rango)',
+                'trending_up': 'Tendencia Alcista',
+                'trending_down': 'Tendencia Bajista',
+                'transitional': 'Transición'
+            };
+            const regimeText = regimeMap[regime] || 'Desconocido';
+
+            let regimeColor = 'var(--blue)';
+            if (regime === 'ranging') regimeColor = 'var(--orange)';
+            else if (regime === 'trending_up') regimeColor = 'var(--green)';
+            else if (regime === 'trending_down') regimeColor = 'var(--red)';
+
             const translatedTrendEl = document.getElementById('translated-trend');
             if (translatedTrendEl) {
-                translatedTrendEl.textContent = `${trendStr} (${forceStr})`;
-                translatedTrendEl.style.color = trendColor;
-                translatedTrendEl.style.borderColor = trendColor;
+                translatedTrendEl.textContent = regimeText;
+                translatedTrendEl.style.color = regimeColor;
+                translatedTrendEl.style.borderColor = regimeColor;
             }
+
+            const rsiText = rsi !== null ? rsi.toFixed(1) : '--';
 
             const summaryEl = document.getElementById('translated-summary');
             if (summaryEl) {
-                summaryEl.innerHTML = `El mercado está operando con una tendencia <strong style="color:${trendColor}">${trendStr.toLowerCase()}</strong> y una fuerza <strong>${forceStr.toLowerCase()}</strong>. La volatilidad actual es <strong>${volatilityStr}</strong> (ATR ${atrPct.toFixed(2)}%).`;
-                summaryEl.style.borderLeftColor = trendColor;
+                summaryEl.innerHTML = `Régimen: <strong style="color:${regimeColor}">${regimeText}</strong>. El mercado actual presenta fuerza <strong>${forceStr.toLowerCase()}</strong> (ADX: ${adx.toFixed(1)}, RSI: ${rsiText}). Volatilidad: <strong>${volatilityStr}</strong> (ATR ${atrPct.toFixed(2)}%).`;
+                summaryEl.style.borderLeftColor = regimeColor;
             }
         }
     }

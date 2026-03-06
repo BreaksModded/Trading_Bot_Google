@@ -5,7 +5,7 @@
 [![Python 3.11+](https://img.shields.io/badge/Python-3.11+-3776AB?logo=python&logoColor=white)](https://python.org)
 [![FastAPI](https://img.shields.io/badge/FastAPI-0.110+-009688?logo=fastapi&logoColor=white)](https://fastapi.tiangolo.com)
 [![Bybit](https://img.shields.io/badge/Bybit-API_v5-F7A600?logo=data:image/svg+xml;base64,PHN2Zy8+&logoColor=white)](https://bybit.com)
-[![Tests](https://img.shields.io/badge/Tests-112_passing-brightgreen)](tests/)
+[![Tests](https://img.shields.io/badge/Tests-93_passing-brightgreen)](tests/)
 [![License](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
 ---
@@ -15,14 +15,16 @@
 | Módulo | Descripción |
 |--------|-------------|
 | **Grid Dinámico Asimétrico** | Spacing basado en ATR con filtros ADX/EMA y spacing asimétrico adaptativo |
+| **Grid Refresh Híbrido** | Re-centra la cuadrícula cuando el precio se aleja, con 5 puertas de seguridad anti-bagholding |
 | **Interés Compuesto Dinámico**| Auto-reinversión de beneficios en el tamaño de las órdenes (Profit Reinvestment) |
+| **Sizing Proporcional** | Órdenes como % del capital: crecen con tus ganancias, se reducen en drawdown |
 | **3 Circuit Breakers** | Max Drawdown (15%), Daily Loss (1%), Price Movement (8%/h) |
 | **Dashboard Web** | 8 paneles con dark-mode, charts en tiempo real, y control del bot |
 | **Backtesting** | Motor event-driven con fees reales, slippage, y walk-forward testing |
 | **Dead Man's Switch** | Proceso independiente que cancela órdenes si el bot se cae |
 | **Telegram** | Alertas de trades, circuit breakers, resumen diario |
 | **API REST** | FastAPI con JWT auth, WebSocket, y exportación CSV |
-| **112+ Tests** | Cobertura de indicadores, riesgo, estrategia, DB, y API |
+| **93+ Tests** | Cobertura de indicadores, riesgo, estrategia, DB, refresh, sizing, y API |
 
 ---
 
@@ -38,6 +40,8 @@ proyecto_bot/
 │   ├── indicators.py     # ATR, ADX, EMA (pandas-ta)
 │   ├── strategy.py       # Grid dinámico + filtros
 │   ├── order_manager.py  # Ciclo de vida de órdenes
+│   ├── grid_refresh.py   # Refresh híbrido con 5 safety gates
+│   ├── dynamic_sizing.py # Sizing proporcional al capital (Phase I)
 │   └── risk_manager.py   # Circuit breakers
 ├── data/                 # Persistencia
 │   ├── database.py       # SQLite (WAL mode, 7 tablas)

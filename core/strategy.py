@@ -8,6 +8,7 @@ from datetime import UTC, datetime
 import pandas as pd
 
 from core.indicators import enrich_indicators
+from core.regime import MarketRegime, classify_regime, get_grid_params_for_regime
 from data.models import GridLevel, OrderSide, TrendBias
 
 
@@ -57,6 +58,8 @@ class StrategySignal:
     ema_slow_val: float = 0.0
     buy_spacing_pct: float = 0.0
     sell_spacing_pct: float = 0.0
+    rsi_value: float = 50.0
+    regime: str = "transitional"
 
     def scale(self, scale_factor: float) -> StrategySignal:
         """Return a new signal instance with proportionally scaled quantities and notional."""
@@ -81,6 +84,8 @@ class StrategySignal:
             ema_slow_val=self.ema_slow_val,
             buy_spacing_pct=self.buy_spacing_pct,
             sell_spacing_pct=self.sell_spacing_pct,
+            rsi_value=self.rsi_value,
+            regime=self.regime,
         )
 
     @property
@@ -227,7 +232,7 @@ class GridStrategy:
 
         return levels
 
-    def compute_signal(self, market_df: pd.DataFrame) -> StrategySignal:
+    def compute_signal(self, market_df: pd.DataFrame, *, grid_settings=None) -> StrategySignal:
         """Compute indicators and return actionable grid signal for the cycle."""
         if market_df.empty:
             raise ValueError("market_df cannot be empty.")
@@ -245,27 +250,59 @@ class GridStrategy:
         adx_value = float(latest["adx"])
         ema_fast_val = float(latest["ema_fast"])
         ema_slow_val = float(latest["ema_slow"])
+        rsi_value = float(latest.get("rsi", 50.0))
+        volume_ratio = float(latest["volume_ratio"])
         trend = self.determine_trend(ema_fast_val, ema_slow_val)
         base_spacing = self.compute_spacing_pct(atr_pct)
         buy_spacing, sell_spacing = self.compute_asymmetric_spacing(base_spacing, trend, adx_value)
 
         pause_grid = self.config.enable_adx_filter and adx_value > self.config.adx_threshold
         reason = "grid_active"
-        
+
+        # Step 5: Regime classification (ADX + RSI)
+        regime_params = {}
+        if grid_settings is not None:
+            regime_params = {
+                "adx_ranging": grid_settings.regime_adx_ranging,
+                "adx_trending": grid_settings.regime_adx_trending,
+                "rsi_upper": grid_settings.regime_rsi_upper,
+                "rsi_lower": grid_settings.regime_rsi_lower,
+            }
+        regime = classify_regime(adx_value, rsi_value, **regime_params)
+
+        # Step 7: Dynamic num_levels based on ATR
+        effective_levels = self.config.num_levels
+        if grid_settings is not None and grid_settings.dynamic_levels_enabled:
+            if atr_pct < grid_settings.levels_low_vol_atr:
+                effective_levels = max(3, self.config.num_levels - 2)
+            elif atr_pct > grid_settings.levels_high_vol_atr:
+                effective_levels = min(grid_settings.levels_max, self.config.num_levels + 2)
+
+        # MEJORA-006: Apply regime-specific spacing and level adjustments
+        adj_spacing, effective_levels, _ = get_grid_params_for_regime(
+            regime, base_spacing, effective_levels
+        )
+        if adj_spacing != base_spacing:
+            buy_spacing, sell_spacing = self.compute_asymmetric_spacing(adj_spacing, trend, adx_value)
+
         # APS-2: Calculate volatile-adjusted sizing (volatility targeting)
         base_size = self.config.order_size_usdt
         target_size = (base_size * self.config.sizing_baseline_atr) / atr_pct if atr_pct > 0 else base_size
         target_size = min(target_size, self.config.max_order_size_usdt)
 
-        # Keep levels available even when ADX pauses new grids;
-        # runtime may use controlled fallback paths. (matches PROYECTO2)
-        levels = self._build_levels(
-            current_price=current_price, buy_spacing_pct=buy_spacing, sell_spacing_pct=sell_spacing, trend=trend, target_size=target_size
-        )
+        # Override num_levels temporarily for level building; use try/finally so
+        # the original value is always restored even if _build_levels raises.
+        original_levels = self.config.num_levels
+        self.config.num_levels = effective_levels
+        try:
+            levels = self._build_levels(
+                current_price=current_price, buy_spacing_pct=buy_spacing, sell_spacing_pct=sell_spacing, trend=trend, target_size=target_size
+            )
+        finally:
+            self.config.num_levels = original_levels
+
         if pause_grid:
             reason = f"adx_above_threshold:{adx_value:.2f}"
-
-        volume_ratio = float(latest["volume_ratio"])
 
         return StrategySignal(
             generated_at=datetime.now(UTC),
@@ -284,9 +321,12 @@ class GridStrategy:
             ema_slow_val=ema_slow_val,
             buy_spacing_pct=buy_spacing,
             sell_spacing_pct=sell_spacing,
+            rsi_value=rsi_value,
+            regime=regime.value,
         )
 
     def estimate_required_capital(self, signal: StrategySignal) -> float:
         """Estimate USDT required for BUY side levels in the signal."""
         buy_levels = [level for level in signal.levels if level.side == OrderSide.BUY]
         return float(len(buy_levels) * signal.target_notional)
+

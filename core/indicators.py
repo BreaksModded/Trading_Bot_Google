@@ -70,11 +70,31 @@ def compute_adx(df: pd.DataFrame, period: int = 14) -> pd.Series:
 
 
 def compute_volume_ratio(series: pd.Series, period: int = 20) -> pd.Series:
-    """Return current volume / SMA(volume, period) ratio."""
+    """Return current volume / median(volume, period) ratio.
+
+    Uses median instead of mean (SMA) to resist volume spikes.
+    A single extreme-volume candle (e.g. during a trend event) would inflate
+    the SMA for ~20 periods, making normal subsequent volume appear low and
+    blocking grid placement.  Median is unaffected by a single outlier.
+    """
     if period <= 0:
         raise ValueError("Volume ratio period must be positive.")
-    sma_vol = series.rolling(window=period, min_periods=1).mean().replace(0, float('nan'))
-    return (series / sma_vol).fillna(0.0)
+    median_vol = series.rolling(window=period, min_periods=1).median().replace(0, float('nan'))
+    return (series / median_vol).fillna(0.0)
+
+
+def compute_rsi(series: pd.Series, period: int = 14) -> pd.Series:
+    """Compute RSI using Wilder smoothing (consistent with ATR/ADX)."""
+    if period <= 0:
+        raise ValueError("RSI period must be positive.")
+    delta = series.diff()
+    gain = delta.where(delta > 0, 0.0)
+    loss = (-delta).where(delta < 0, 0.0)
+    avg_gain = gain.ewm(alpha=1 / period, adjust=False).mean()
+    avg_loss = loss.ewm(alpha=1 / period, adjust=False).mean()
+    rs = avg_gain / avg_loss.replace(0, float('nan'))
+    rsi = 100.0 - (100.0 / (1.0 + rs))
+    return rsi.fillna(50.0)  # Neutral when insufficient data
 
 
 def enrich_indicators(
@@ -86,7 +106,7 @@ def enrich_indicators(
     adx_period: int = 14,
     volume_ratio_period: int = 20,
 ) -> pd.DataFrame:
-    """Return a copy with EMA, ATR, ADX, and volume_ratio columns appended."""
+    """Return a copy with EMA, ATR, ADX, RSI, and volume_ratio columns appended."""
     required = {"open", "high", "low", "close", "volume"}
     missing = required - set(df.columns)
     if missing:
@@ -99,4 +119,6 @@ def enrich_indicators(
     out["adx"] = compute_adx(out, period=adx_period)
     out["atr_pct"] = out["atr"] / out["close"]
     out["volume_ratio"] = compute_volume_ratio(out["volume"], period=volume_ratio_period)
+    out["rsi"] = compute_rsi(out["close"], period=atr_period)
     return out
+

@@ -1,0 +1,15 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(python -c \":*)",
+      "Bash(python -m pytest tests/ -v --tb=short)",
+      "Bash(python -m pytest tests/unit/test_lifecycle_fixes.py -v)",
+      "Bash(python -m pytest --tb=short -q)",
+      "Bash(python -m pytest --tb=short -q --collect-only)",
+      "Bash(python -m pytest tests/unit/test_lifecycle_fixes.py -v --tb=short)",
+      "Bash(python -c \"from core.exchange import BybitExchangeClient; e = BybitExchangeClient\\(api_key='''', api_secret='''', testnet=True, symbol=''BTCUSDC''\\); print\\(hasattr\\(e, ''place_market_order''\\)\\)\")",
+      "Bash(python -m pytest tests/unit/test_improvements.py tests/unit/test_order_manager.py tests/unit/test_risk_manager.py -v --tb=short)",
+      "Bash(python -m pytest tests/unit/test_protocol_conformance.py -v)"
+    ]
+  }
+}

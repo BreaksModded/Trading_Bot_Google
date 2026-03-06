@@ -154,7 +154,7 @@ class BybitExchangeClient:
         coins = wallet_list[0].get("coin", [])
         for item in coins:
             if item.get("coin") == coin:
-                return float(item.get("walletBalance", 0.0))
+                return float(item.get("walletBalance") or 0.0)
         return 0.0
 
     async def get_balances(self, coins: list[str] | None = None) -> dict[str, float]:
@@ -194,13 +194,13 @@ class BybitExchangeClient:
         )
         wallet_list = response.get("result", {}).get("list", [])
         if not wallet_list:
-            return 0.0
+            return 0.0, 0.0
 
         coins_data = wallet_list[0].get("coin", [])
         balances: dict[str, float] = {}
         for item in coins_data:
             coin = item.get("coin", "")
-            bal = float(item.get("walletBalance", 0.0))
+            bal = float(item.get("walletBalance") or 0.0)
             if bal > 0:
                 balances[coin] = bal
 
@@ -479,6 +479,50 @@ class BybitExchangeClient:
         target = symbol or self.symbol
         client = self._ensure_http()
         await self._run_http(client.cancel_all_orders, category=self.category, symbol=target)
+
+    async def place_market_order(
+        self, *, symbol: str, side: str, qty: float,
+    ) -> str:
+        """Place an immediate market order and return exchange order ID.
+
+        Bybit Spot UTA specifics:
+        - SELL: qty is in base asset (e.g. BTC); no marketUnit needed.
+        - BUY:  qty is in quote asset (e.g. USDC); marketUnit="quoteCoinQty".
+        - PostOnly / timeInForce must NOT be set for market orders.
+        - retCode != 0 is logged as error but the result dict is returned
+          so the caller can decide how to handle it (same as place_limit_order).
+        """
+        client = self._ensure_http()
+        rules = await self.get_spot_symbol_rules(symbol)
+        normalized_qty = self._round_down_to_step(Decimal(str(qty)), rules.qty_step)
+
+        if normalized_qty < rules.min_qty:
+            raise ExchangeError(
+                f"Market order qty below minimum after normalization: "
+                f"{normalized_qty} < {rules.min_qty} for {symbol}"
+            )
+
+        params: dict[str, Any] = dict(
+            category=self.category,
+            symbol=symbol,
+            side=side,
+            orderType="Market",
+            qty=self._decimal_to_plain_str(normalized_qty),
+        )
+        if side == "Buy":
+            # Bybit Spot: BUY market qty is interpreted as quote coin amount
+            params["marketUnit"] = "quoteCoinQty"
+
+        logger.info("{}: placing market {} order qty={}", symbol, side, params["qty"])
+
+        response = await self._run_http(client.place_order, **params)
+        if response.get("retCode") != 0:
+            logger.error(
+                "{}: market order rejected — retCode={} retMsg={}",
+                symbol, response.get("retCode"), response.get("retMsg"),
+            )
+        order_id = response.get("result", {}).get("orderId", "")
+        return str(order_id)
 
     async def set_stop_loss_hard(
         self, *, symbol: str, trigger_price: float, qty: float,

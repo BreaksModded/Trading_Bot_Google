@@ -63,12 +63,11 @@ async def get_circuit_breaker_events(
 
 @router.get("/logs/risk-status")
 async def get_risk_status(request: Request, username: str = Depends(verify_token)):
-    """Get current risk management status."""
+    """Get current risk management status from the bot's persisted snapshot."""
     state = request.app.state
-    if hasattr(state, "risk_manager") and getattr(state, "risk_manager"):
-        return state.risk_manager.get_risk_status()
-    # Mocking since risk_manager isn't part of app.state currently
-    return {
-        "is_paused": getattr(state, "risk_paused", False),
-        "drawdown_pct": getattr(state, "latest_drawdown", 0.0)
-    }
+    if not state.db:
+        return {"available": False}
+    risk_status = state.db.get_runtime_config("risk_status")
+    if risk_status is None:
+        return {"available": False, "is_paused": False, "drawdown_pct": 0.0}
+    return risk_status

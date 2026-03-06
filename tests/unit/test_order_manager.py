@@ -30,7 +30,7 @@ async def test_place_grid_orders_stores_all_levels(manager, sample_signal):
         }
     manager.exchange.place_limit_order.side_effect = mock_place
 
-    await manager.place_grid_orders(sample_signal.levels, sample_signal.spacing_pct)
+    await manager.place_grid_orders(sample_signal.levels, buy_spacing_pct=sample_signal.spacing_pct, sell_spacing_pct=sample_signal.spacing_pct)
     
     orders = manager.open_orders
     assert len(orders) == len(sample_signal.levels)
@@ -49,7 +49,7 @@ async def test_place_grid_orders_partial_failure(mock_logger, manager, sample_si
         return {"orderId": f"ord_{kw['price']}", "orderLinkId": kw.get("orderLinkId"), "status": "NEW"}
     
     manager.exchange.place_limit_order.side_effect = mock_place
-    await manager.place_grid_orders(sample_signal.levels, sample_signal.spacing_pct)
+    await manager.place_grid_orders(sample_signal.levels, buy_spacing_pct=sample_signal.spacing_pct, sell_spacing_pct=sample_signal.spacing_pct)
     
     orders = manager.open_orders
     assert len(orders) == 4
@@ -60,7 +60,7 @@ async def test_place_grid_orders_partial_failure(mock_logger, manager, sample_si
 @pytest.mark.asyncio
 async def test_place_grid_orders_total_failure(mock_logger, manager, sample_signal):
     manager.exchange.place_limit_order.side_effect = Exception("Global API Error")
-    await manager.place_grid_orders(sample_signal.levels, sample_signal.spacing_pct)
+    await manager.place_grid_orders(sample_signal.levels, buy_spacing_pct=sample_signal.spacing_pct, sell_spacing_pct=sample_signal.spacing_pct)
     assert len(manager.open_orders) == 0
     assert any("levels failed" in call.args[0] and call.args[2] == 5 for call in mock_logger.call_args_list)
 
@@ -71,7 +71,7 @@ async def test_order_deduplication_prevents_double_placement(manager, sample_sig
         order_id="existing_123", level_id=lvl.level_id, symbol="BTCUSDT", side="Buy", price=40000.0, qty=0.1, status=OrderStatus.PENDING
     )
     
-    await manager.place_grid_orders([lvl], sample_signal.spacing_pct)
+    await manager.place_grid_orders([lvl], buy_spacing_pct=sample_signal.spacing_pct, sell_spacing_pct=sample_signal.spacing_pct)
     manager.exchange.place_limit_order.assert_not_called()
 
 @pytest.mark.asyncio
@@ -85,7 +85,7 @@ async def test_gather_places_levels_concurrently(manager):
     manager.exchange.place_limit_order.side_effect = delayed_place
     
     start_t = time.monotonic()
-    await manager.place_grid_orders(levels, 0.01)
+    await manager.place_grid_orders(levels, buy_spacing_pct=0.01, sell_spacing_pct=0.01)
     duration = time.monotonic() - start_t
     
     assert duration < 0.2
@@ -101,7 +101,7 @@ async def test_gather_return_exceptions_true_prevents_cancellation(manager):
         return {"orderId": f"ord_{kw['price']}", "orderLinkId": kw.get("orderLinkId"), "status": "NEW"}
         
     manager.exchange.place_limit_order.side_effect = picky_place
-    await manager.place_grid_orders(levels, 0.01)
+    await manager.place_grid_orders(levels, buy_spacing_pct=0.01, sell_spacing_pct=0.01)
     
     orders = manager.open_orders
     assert len(orders) == 9
@@ -111,19 +111,28 @@ async def test_handle_fill_triggers_inverse_grid_placement(manager):
     manager._orders["ext_1"] = ManagedOrder(
         order_id="ext_1", level_id="lvl_1", symbol="BTCUSDT", side="Buy", price=50000.0, qty=0.1, status=OrderStatus.PENDING
     )
+    # Set spacing so inverse price can be calculated
+    manager._sell_spacing_pct = 0.01
+    manager._buy_spacing_pct = 0.01
     
+    # place_limit_order returns a string order ID
     manager.exchange.place_limit_order.return_value = "ext_inv_1"
     
-    fill_event = {"orderId": "ext_1", "status": "Filled", "execQty": "0.1", "price": "50000.0", "side": "Buy"}
-    await manager.handle_fill(fill_event)
+    fill_event = {
+        "orderId": "ext_1", "status": "Filled", "execQty": "0.1", 
+        "price": "50000.0", "side": "Buy", "execFee": "0.0001", "feeCurrency": "BTC"
+    }
+    trade = await manager.handle_fill(fill_event)
     
+    assert trade is not None
     assert manager._orders["ext_1"].status == OrderStatus.FILLED
+    # The inverse order is stored under the returned order_id string
     assert "ext_inv_1" in manager._orders
     
     manager.exchange.place_limit_order.assert_called_once()
     call_args = manager.exchange.place_limit_order.call_args[1]
     assert call_args["side"] == "Sell"
-    assert call_args["qty"] == 0.1
+    assert call_args["qty"] == 0.0999 # 0.1 - 0.0001 fee
     assert call_args["price"] > 50000.0
 
 @pytest.mark.asyncio
