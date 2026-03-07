@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass, field
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Protocol
 
 from data.models import GridLevel, GridState, OrderSide, OrderStatus, TradeRecord
@@ -43,6 +43,7 @@ class ManagedOrder:
     qty: float
     status: str = OrderStatus.PENDING
     created_at: datetime = field(default_factory=lambda: datetime.now(UTC))
+    updated_at: datetime = field(default_factory=lambda: datetime.now(UTC))
 
 
 class OrderManager:
@@ -211,7 +212,9 @@ class OrderManager:
         async with self._lock:
             await self.exchange.cancel_all_orders(symbol=self.symbol)
             for order in self._orders.values():
-                order.status = OrderStatus.CANCELED
+                if order.status == OrderStatus.PENDING:
+                    order.status = OrderStatus.CANCELED
+                    order.updated_at = datetime.now(UTC)
 
     async def cancel_entry_orders_only(self, abort_on_error: bool = False) -> int:
         """
@@ -236,12 +239,14 @@ class OrderManager:
                 try:
                     await self.exchange.cancel_order(symbol=self.symbol, order_id=order.order_id)
                     order.status = OrderStatus.CANCELED
+                    order.updated_at = datetime.now(UTC)
                     cancelled_count += 1
                 except Exception as exc:
                     exc_str = str(exc).lower()
                     # Phase H: Handle race condition — order filled during cancel
                     if "filled" in exc_str or "not found" in exc_str or "not exist" in exc_str:
                         order.status = OrderStatus.FILLED
+                        order.updated_at = datetime.now(UTC)
                         self._confirmed_fill_ids.add(order.order_id)
                         logger.info(
                             "{}: Order {} filled/gone during refresh cancel (race condition handled)",
@@ -273,131 +278,151 @@ class OrderManager:
 
     async def sync_with_exchange(self) -> None:
         """Synchronize tracked orders with exchange open order list."""
-        async with self._lock:
+        # 1. Network: Get open orders from exchange outside the lock
+        try:
             exchange_orders = await self.exchange.get_open_orders(symbol=self.symbol)
-            open_ids = {
-                str(item.get("orderId") or item.get("order_id"))
-                for item in exchange_orders
-            }
-            
-            # Bug 1 Fix: Accumulate missing fills to process outside the lock
-            missing_fills = []
-            
+        except Exception as e:
+            logger.error("{}: sync_with_exchange: failed to get open orders: {}", self.symbol, e)
+            return
+
+        open_ids = {
+            str(item.get("orderId") or item.get("order_id"))
+            for item in exchange_orders
+        }
+
+        # 2. Analyze state within lock and identify IDs that need history lookup
+        reconcile_ids = []
+        async with self._lock:
             for order_id, order in self._orders.items():
                 if order_id not in open_ids and order.status == OrderStatus.PENDING:
                     if order_id in self._confirmed_fill_ids:
                         order.status = OrderStatus.FILLED
+                        order.updated_at = datetime.now(UTC)
                     else:
-                        # FIX #4: REST Fallback check for missing WS fills
-                        try:
-                            history = await self.exchange.get_order_history(symbol=self.symbol, order_id=order_id)
-                        except Exception as e:
-                            logger.warning("{}: Error reconciling order {}: {}", self.symbol, order_id, e)
-                            history = None
-                            
-                        if history:
-                            status = str(history.get("orderStatus", "")).upper()
-                            if status == "FILLED":
-                                logger.info("{}: [REST Fallback] Recovered missing fill for {}", self.symbol, order_id)
-                                order.status = OrderStatus.FILLED
-                                self._confirmed_fill_ids.add(order_id)
-                                missing_fills.append(history)
-                                continue
-                            elif status in ("CANCELED", "CANCELLED", "DEACTIVATED", "REJECTED"):
-                                order.status = OrderStatus.CANCELED
-                                continue
-                        
-                        # If history fetch fails or status is ambiguous, log and defer to next cycle
-                        # to prevent falsely abandoning a filled position
-                        logger.warning("{}: Ambiguous order status for {} - keeping PENDING", self.symbol, order_id)
+                        reconcile_ids.append(order_id)
 
-            # R8: retry any pending inverse orders
-            MAX_INVERSE_RETRIES = 10
+        # 3. Network: Batch fetch history for candidates outside the lock
+        history_results = {}
+        for order_id in reconcile_ids:
+            try:
+                hist = await self.exchange.get_order_history(symbol=self.symbol, order_id=order_id)
+                if hist:
+                    history_results[order_id] = hist
+            except Exception as e:
+                logger.warning("{}: Error reconciling order {}: {}", self.symbol, order_id, e)
+
+        # 4. Process results and handle inverse order retries within lock
+        missing_fills = []
+        async with self._lock:
+            for order_id, history in history_results.items():
+                order = self._orders.get(order_id)
+                if not order:
+                    continue
+                
+                status = str(history.get("orderStatus", "")).upper()
+                if status == "FILLED":
+                    logger.info("{}: [REST Fallback] Recovered missing fill for {}", self.symbol, order_id)
+                    order.status = OrderStatus.FILLED
+                    order.updated_at = datetime.now(UTC)
+                    self._confirmed_fill_ids.add(order_id)
+                    missing_fills.append(history)
+                elif status in ("CANCELED", "CANCELLED", "DEACTIVATED", "REJECTED"):
+                    order.status = OrderStatus.CANCELED
+                    order.updated_at = datetime.now(UTC)
+                else:
+                    logger.warning("{}: Ambiguous order status for {} ({}) - keeping PENDING", 
+                                   self.symbol, order_id, status)
+
+            # R8: identify inverse orders that need retrying
             retries = list(self._pending_inverse_retries)
             self._pending_inverse_retries.clear()
-            for retry in retries:
-                retry_count = retry.get("retry_count", 0)
 
-                # Abandon after too many failures to avoid infinite loops
-                if retry_count >= MAX_INVERSE_RETRIES:
-                    logger.error(
-                        "{}: inverse retry ABANDONED after {} attempts "
-                        "(side={} qty={} price={}). Manual check required.",
-                        self.symbol, retry_count,
-                        retry["side"], retry["qty"], retry["price"],
-                    )
-                    continue
+        # 5. Execute retries outside the lock to avoid recursive network calls in lock
+        for retry in retries:
+            await self._execute_inverse_retry(retry)
 
-                # For SELL retries: cap qty to actual position to avoid fee-rounding 170131
-                # and adjust price to current market ask if market has moved above target.
-                effective_qty = retry["qty"]
-                effective_price = retry["price"]
-                if retry["side"].upper() == "SELL":
-                    position = getattr(self, "_position_qty", 0.0) or 0.0
-                    if position < retry["qty"] * 0.95:
-                        # Position too small — asset likely sold or lost, skip entirely
-                        logger.warning(
-                            "{}: inverse SELL retry skipped — position {:.6f} < required {:.6f}. "
-                            "Asset may have been sold or locked by a stop order.",
-                            self.symbol, position, retry["qty"],
-                        )
-                        continue
-                    if position < retry["qty"]:
-                        # Small fee-rounding gap: cap to available position
-                        logger.info(
-                            "{}: inverse SELL retry qty adjusted {:.6f} → {:.6f} (fee rounding).",
-                            self.symbol, retry["qty"], position,
-                        )
-                        effective_qty = position
-
-                    # Adjust sell price to current ask if market has moved above original target.
-                    # Selling at a higher price = more profit than the original grid target.
-                    try:
-                        ob = await self.exchange.get_orderbook(symbol=self.symbol, limit=1)
-                        best_ask = ob.get("best_ask", 0.0)
-                        if best_ask > 0 and best_ask > retry["price"]:
-                            logger.info(
-                                "{}: inverse SELL retry price adjusted {:.4f} → {:.4f} "
-                                "(market ask above original target — higher profit).",
-                                self.symbol, retry["price"], best_ask,
-                            )
-                            effective_price = best_ask
-                    except Exception as ob_exc:
-                        logger.warning(
-                            "{}: orderbook fetch failed during SELL retry, using original price: {}",
-                            self.symbol, ob_exc,
-                        )
-
-                try:
-                    root_id = self._root_level_id(retry["level_id"])
-                    timestamp_ms = str(int(datetime.now(UTC).timestamp() * 1000))
-                    # Prevent truncation of the timestamp by shortening the root_id
-                    short_root = root_id[-18:] if len(root_id) > 18 else root_id
-                    fresh_link_id = f"inv-{short_root}-{timestamp_ms}"
-
-                    inv_id = await self.exchange.place_limit_order(
-                        symbol=self.symbol,
-                        side=retry["side"],
-                        qty=effective_qty,
-                        price=effective_price,
-                        orderLinkId=fresh_link_id,
-                    )
-                    self._orders[inv_id] = ManagedOrder(
-                        order_id=inv_id,
-                        level_id=fresh_link_id,
-                        symbol=self.symbol,
-                        side=retry["side"],
-                        price=effective_price,
-                        qty=effective_qty,
-                    )
-                except Exception as exc:
-                    logger.error("{}: inverse retry failed (attempt {}/{}): {}", self.symbol, retry_count + 1, MAX_INVERSE_RETRIES, exc)
-                    retry["retry_count"] = retry_count + 1
-                    self._pending_inverse_retries.append(retry)
-
-        # Bug 1 Fix: Execute handlers outside of lock context
+        # 6. Bug 1 Fix: Execute fill handlers outside of lock context
         for history in missing_fills:
             await self.handle_fill(history)
+
+    async def _execute_inverse_retry(self, retry: dict) -> None:
+        """Helper to execute a single inverse order retry outside the main sync lock."""
+        MAX_INVERSE_RETRIES = 10
+        retry_count = retry.get("retry_count", 0)
+
+        if retry_count >= MAX_INVERSE_RETRIES:
+            logger.error(
+                "{}: inverse retry ABANDONED after {} attempts "
+                "(side={} qty={} price={}). Manual check required.",
+                self.symbol, retry_count,
+                retry["side"], retry["qty"], retry["price"],
+            )
+            return
+
+        effective_qty = retry["qty"]
+        effective_price = retry["price"]
+        
+        if retry["side"].upper() == "SELL":
+            async with self._lock:
+                position = self._position_qty
+            
+            if position < retry["qty"] * 0.95:
+                logger.warning(
+                    "{}: inverse SELL retry skipped — position {:.6f} < required {:.6f}. "
+                    "Asset may have been sold or locked by a stop order.",
+                    self.symbol, position, retry["qty"],
+                )
+                return
+            if position < retry["qty"]:
+                logger.info(
+                    "{}: inverse SELL retry qty adjusted {:.6f} → {:.6f} (fee rounding).",
+                    self.symbol, retry["qty"], position,
+                )
+                effective_qty = position
+
+            try:
+                ob = await self.exchange.get_orderbook(symbol=self.symbol, limit=1)
+                best_ask = ob.get("best_ask", 0.0)
+                if best_ask > 0 and best_ask > retry["price"]:
+                    logger.info(
+                        "{}: inverse SELL retry price adjusted {:.4f} → {:.4f} "
+                        "(market ask above original target — higher profit).",
+                        self.symbol, retry["price"], best_ask,
+                    )
+                    effective_price = best_ask
+            except Exception as ob_exc:
+                logger.warning(
+                    "{}: orderbook fetch failed during SELL retry, using original price: {}",
+                    self.symbol, ob_exc,
+                )
+
+        try:
+            root_id = self._root_level_id(retry["level_id"])
+            timestamp_ms = str(int(datetime.now(UTC).timestamp() * 1000))
+            short_root = root_id[-18:] if len(root_id) > 18 else root_id
+            fresh_link_id = f"inv-{short_root}-{timestamp_ms}"
+
+            inv_id = await self.exchange.place_limit_order(
+                symbol=self.symbol,
+                side=retry["side"],
+                qty=effective_qty,
+                price=effective_price,
+                orderLinkId=fresh_link_id,
+            )
+            async with self._lock:
+                self._orders[inv_id] = ManagedOrder(
+                    order_id=inv_id,
+                    level_id=fresh_link_id,
+                    symbol=self.symbol,
+                    side=retry["side"],
+                    price=effective_price,
+                    qty=effective_qty,
+                )
+        except Exception as exc:
+            logger.error("{}: inverse retry failed (attempt {}/{}): {}", self.symbol, retry_count + 1, MAX_INVERSE_RETRIES, exc)
+            retry["retry_count"] = retry_count + 1
+            async with self._lock:
+                self._pending_inverse_retries.append(retry)
 
     async def recover_from_crash(self) -> list[dict]:
         """Load currently open exchange orders to avoid orphan-state on restart."""
@@ -471,51 +496,71 @@ class OrderManager:
                     
                 logger.debug("{}: Fill buffered (order not yet registered): {}", self.symbol, order_id)
                 return None
+
+            # BUG-3 FIX: Idempotency check. If the order is already FILLED (e.g., via REST fallback),
+            # skip processing this fill event to avoid duplicate inventory/inverse orders.
+            if managed.status == OrderStatus.FILLED:
+                # Still clear the buffer for this order if it was present
+                self._unmatched_ws_fills.pop(order_id, None)
+                self._unmatched_ws_timestamps.pop(order_id, None)
+                logger.debug("{}: handle_fill: order {} already FILLED, skipping", self.symbol, order_id)
+                return None
             
             # Bug 4 Fix: If order is found, ensure we clear the buffer for it
             self._unmatched_ws_fills.pop(order_id, None)
             self._unmatched_ws_timestamps.pop(order_id, None)
             
-            managed.status = OrderStatus.FILLED
-            self._confirmed_fill_ids.add(order_id)
-            if len(self._confirmed_fill_ids) > 10_000:
-                self._confirmed_fill_ids.clear()
-
+            # BUG-1 FIX: Handle Partial Fills incrementaly.
+            # execQty is the amount filled in THIS specific event.
+            # cumExecQty is the total amount filled for the order so far.
             side = str(fill_event.get("side", managed.side))
             price = float(
                 fill_event.get("avgPrice") or fill_event.get("price") or managed.price
             )
-            qty = float(
+            exec_qty = float(
                 fill_event.get("execQty") or fill_event.get("qty") or managed.qty
             )
+            cum_exec_qty = float(
+                fill_event.get("cumExecQty") or exec_qty
+            )
+
             # M8: zero-qty guard — reject degenerate fills
-            if qty <= 0:
+            if exec_qty <= 0:
                 return None
+
+            # Mark as FILLED only if the entire order is complete
+            is_full_fill = cum_exec_qty >= (managed.qty * 0.999) # Float tolerance
+            if is_full_fill:
+                managed.status = OrderStatus.FILLED
+                managed.updated_at = datetime.now(UTC)
+                self._confirmed_fill_ids.add(order_id)
+                if len(self._confirmed_fill_ids) > 10_000:
+                    self._confirmed_fill_ids.clear()
+            
             fee = float(
-                fill_event.get("execFee") or (price * qty * self.maker_fee_pct)
+                fill_event.get("execFee") or (price * exec_qty * self.maker_fee_pct)
             )
 
             # BUG 2 FIX: Calculate net sellable qty if spot BUY fee is deducted from base asset
             fee_currency = str(fill_event.get("feeCurrency") or fill_event.get("feeAsset") or "").upper()
             base_asset = self.symbol.replace("USDC", "").replace("USDT", "").upper()
 
-            sellable_qty = qty
+            sellable_qty = exec_qty
             if side == OrderSide.BUY:
                 if fee_currency == base_asset or fee_currency == "":
-                    # BUG FIX: If we used the fallback calculation (price * qty * fee_pct),
+                    # If we used the fallback calculation (price * qty * fee_pct),
                     # it was in quote currency. If we are deducting from base asset, 
                     # the amount must be in base units.
                     if not fill_event.get("execFee"):
-                        fee = qty * self.maker_fee_pct
+                        fee = exec_qty * self.maker_fee_pct
                     
-                    sellable_qty = max(0.0, qty - fee)
-                    logger.debug("{}: Base fee deducted. execQty={}, fee={}, sellable_qty={}", self.symbol, qty, fee, sellable_qty)
+                    sellable_qty = max(0.0, exec_qty - fee)
+                    logger.debug("{}: Base fee deducted. execQty={}, fee={}, sellable_qty={}", self.symbol, exec_qty, fee, sellable_qty)
 
-            # R2: capture cost basis BEFORE position update (fix: avg_cost was being
-            # reset to 0 before PnL calculation, causing all SELLs to show pnl=-fee)
+            # R2: capture cost basis BEFORE position update
             cost_basis = self._avg_cost
 
-            # R2: update avg_cost and position tracking
+            # R2: update avg_cost and position tracking (incremental via exec_qty)
             if side == OrderSide.BUY:
                 if not self._position_untracked:
                     total_cost = self._avg_cost * self._position_qty + price * sellable_qty
@@ -524,12 +569,18 @@ class OrderManager:
                 else:
                     self._position_qty += sellable_qty
             elif side == OrderSide.SELL:
-                self._position_qty = max(0.0, self._position_qty - qty)
+                self._position_qty = max(0.0, self._position_qty - exec_qty)
                 if self._position_qty == 0:
                     self._avg_cost = 0.0
                     self._position_untracked = False
 
-            # Place inverse order for grid rebalancing
+            # BUG-1 FIX: Place inverse order ONLY when the grid level is fully filled
+            if not is_full_fill:
+                logger.info("{}: Partial fill processed ({:.6f}/{:.6f}) for {}. Waiting for completion.", 
+                            self.symbol, cum_exec_qty, managed.qty, order_id)
+                return None
+
+            # Place inverse order for grid rebalancing (full qty)
             inverse_side = OrderSide.SELL if side == OrderSide.BUY else OrderSide.BUY
             if inverse_side == OrderSide.SELL:
                 spacing = self._sell_spacing_pct if self._sell_spacing_pct > 0 else self.default_spacing_pct
@@ -544,7 +595,7 @@ class OrderManager:
             inv_link_id = f"inv-{short_root}-{timestamp_ms}"
 
             # R8: wrap in try/except to prevent fill loss on inverse failure
-            inverse_qty = sellable_qty if side == OrderSide.BUY else qty
+            inverse_qty = sellable_qty if side == OrderSide.BUY else managed.qty
             try:
                 inverse_order_id = await self.exchange.place_limit_order(
                     symbol=self.symbol,
@@ -570,14 +621,14 @@ class OrderManager:
                     "level_id": inv_link_id,
                 })
 
-        # R2: realized PnL = (sell_price - avg_cost) * qty - fee
+        # R2: realized PnL = (sell_price - avg_cost) * exec_qty - fee
         pnl = 0.0
         if side == OrderSide.SELL:
             if self._position_untracked:
                 pnl = 0.0
-                logger.info("{}: [PnL] Untracked — cost basis unknown. Sale volume {:.4f}", self.symbol, qty)
+                logger.info("{}: [PnL] Untracked — cost basis unknown. Sale volume {:.4f}", self.symbol, exec_qty)
             elif cost_basis > 0:
-                pnl = (price - cost_basis) * qty - fee
+                pnl = (price - cost_basis) * exec_qty - fee
                 self._check_fee_efficiency(pnl + fee, fee)
             else:
                 pnl = -fee  # no cost basis known, conservative
@@ -587,7 +638,7 @@ class OrderManager:
             timestamp=datetime.now(UTC),
             side=side,
             price=price,
-            qty=qty,
+            qty=exec_qty,
             fee=fee,
             pnl=pnl,
             status=OrderStatus.FILLED,
@@ -666,6 +717,7 @@ class OrderManager:
                 try:
                     await self.exchange.cancel_order(symbol=self.symbol, order_id=order.order_id)
                     order.status = OrderStatus.CANCELED
+                    order.updated_at = datetime.now(UTC)
                     
                     timestamp_ms = str(int(datetime.now(UTC).timestamp() * 1000))
                     root_id = self._root_level_id(order.level_id)
@@ -722,14 +774,32 @@ class OrderManager:
 
         # Sell all inventory at market
         try:
-            await self.exchange.place_market_order(
+            order_id = await self.exchange.place_market_order(
                 symbol=self.symbol,
                 side=str(OrderSide.SELL),
                 qty=self._position_qty,
             )
+            
+            async with self._lock:
+                # Register the market order so handle_fill can process its fill event
+                if order_id:
+                    self._orders[order_id] = ManagedOrder(
+                        order_id=order_id,
+                        level_id=f"sl-market-{datetime.now(UTC).timestamp()}",
+                        symbol=self.symbol,
+                        side=str(OrderSide.SELL),
+                        price=current_price,
+                        qty=self._position_qty,
+                    )
+                
+                # Critical: reset state immediately to prevent looping in the next bot cycle
+                self._position_qty = 0.0
+                self._avg_cost = 0.0
+                self._position_untracked = False
+
             logger.warning(
-                "{}: market sell {:.6f} placed (stop-loss at {:.4f})",
-                self.symbol, self._position_qty, current_price,
+                "{}: market sell {:.6f} (ID: {}) placed (stop-loss at {:.4f}). Position reset.",
+                self.symbol, self._position_qty, order_id or "UNKNOWN", current_price,
             )
         except Exception as exc:
             logger.error("{}: market sell failed during stop-loss: {}", self.symbol, exc)
@@ -787,3 +857,20 @@ class OrderManager:
             avg_cost=self._avg_cost,
             position_qty=self._position_qty,
         )
+
+    async def _cleanup_stale_orders(self, max_age_hours: float = 24.0) -> int:
+        """Purge FILLED or CANCELED orders older than max_age_hours from memory."""
+        cutoff = datetime.now(UTC) - timedelta(hours=max_age_hours)
+        async with self._lock:
+            to_delete = [
+                oid for oid, order in self._orders.items()
+                if order.status in (OrderStatus.FILLED, OrderStatus.CANCELED)
+                and order.updated_at < cutoff
+            ]
+            for oid in to_delete:
+                del self._orders[oid]
+            
+            if to_delete:
+                logger.debug("{}: Purged {} stale orders from memory", self.symbol, len(to_delete))
+            
+            return len(to_delete)

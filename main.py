@@ -39,8 +39,8 @@ class BotRuntimeState:
 def _reconstruct_avg_cost(recent_trades: list[dict]) -> float:
     """Reconstruct weighted avg_cost from DB trade history for crash recovery.
 
-    Uses only BUY trades that occurred after the most recent SELL trade,
-    so we never mix cost bases from different trading cycles.
+    Uses a cumulative chronological approach to handle partial sells without
+    losing previous cost basis information.
 
     Args:
         recent_trades: rows from get_recent_trades(), ordered DESC by timestamp.
@@ -48,28 +48,39 @@ def _reconstruct_avg_cost(recent_trades: list[dict]) -> float:
     Returns:
         Weighted avg_cost > 0 if reconstructable, else 0.0.
     """
-    # Find the most recent SELL (first SELL in DESC order)
-    last_sell_ts: str | None = None
-    for trade in recent_trades:
-        if str(trade.get("side", "")).lower() == "sell":
-            last_sell_ts = str(trade["timestamp"])
-            break
-
-    # Collect BUY trades that are newer than the last SELL
-    open_buys = [
-        t for t in recent_trades
-        if str(t.get("side", "")).lower() == "buy"
-        and (last_sell_ts is None or str(t["timestamp"]) > last_sell_ts)
-        and float(t.get("price") or 0) > 0
-        and float(t.get("qty") or 0) > 0
-    ]
-
-    if not open_buys:
+    if not recent_trades:
         return 0.0
 
-    total_value = sum(float(t["price"]) * float(t["qty"]) for t in open_buys)
-    total_qty = sum(float(t["qty"]) for t in open_buys)
-    return total_value / total_qty if total_qty > 0 else 0.0
+    # Sort chronological: oldest first
+    trades = sorted(
+        recent_trades, 
+        key=lambda x: str(x.get("timestamp", ""))
+    )
+
+    cum_qty = 0.0
+    avg_cost = 0.0
+
+    for trade in trades:
+        side = str(trade.get("side", "")).lower()
+        price = float(trade.get("price") or 0.0)
+        qty = float(trade.get("qty") or 0.0)
+        
+        if qty <= 0 or price <= 0:
+            continue
+
+        if side == "buy":
+            # Weighted average: (old_total + new_total) / total_qty
+            total_cost = (avg_cost * cum_qty) + (price * qty)
+            cum_qty += qty
+            avg_cost = total_cost / cum_qty if cum_qty > 0 else 0.0
+        elif side == "sell":
+            # Selling reduces qty but doesn't change avg_cost per unit
+            cum_qty -= qty
+            if cum_qty <= 1e-9: # Effectively zero
+                cum_qty = 0.0
+                avg_cost = 0.0
+
+    return avg_cost if cum_qty > 0 else 0.0
 
 
 class TradingBot:
@@ -97,6 +108,7 @@ class TradingBot:
         self.health_monitor = health_monitor
         self.state = BotRuntimeState()
         self._last_cleanup_date: date | None = None
+        self._last_mem_cleanup: datetime = datetime.now(UTC)
 
         self.symbols = list(self.strategies.keys())
         quote_coins = {settings.parse_quote_coin(s) for s in self.symbols}
@@ -529,6 +541,12 @@ class TradingBot:
                 if self._last_cleanup_date != today:
                     await asyncio.to_thread(self.db.cleanup_old_events, days=90)
                     self._last_cleanup_date = today
+
+                # E5: hourly memory cleanup for stale orders
+                if (datetime.now(UTC) - self._last_mem_cleanup).total_seconds() > 3600:
+                    for mgr in self.order_managers.values():
+                        await mgr._cleanup_stale_orders(max_age_hours=24.0)
+                    self._last_mem_cleanup = datetime.now(UTC)
 
                 # WKS-2: Wait for WS trigger or 60s max heartbeat timeout
                 self._signal_eval_event.clear()
@@ -1571,7 +1589,8 @@ class TradingBot:
             data = message.get("data", [])
             events = data if isinstance(data, list) else [data]
             for event in events:
-                if event.get("orderStatus") != "Filled":
+                status = event.get("orderStatus", "")
+                if status not in ("Filled", "PartiallyFilled"):
                     continue
                 symbol = str(event.get("symbol", "")).upper()
                 managers: list[OrderManager]

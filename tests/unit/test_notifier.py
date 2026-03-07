@@ -20,7 +20,16 @@ def mock_app_builder():
          patch("telegram.ext.CommandHandler") as cmd_handler_cls, \
          patch("telegram.ext.ContextTypes"):
             
-        app_mock = AsyncMock()
+        app_mock = MagicMock()
+        # Explicitly make async methods AsyncMock, while add_handler remains sync (MagicMock default)
+        app_mock.initialize = AsyncMock()
+        app_mock.start = AsyncMock()
+        app_mock.stop = AsyncMock()
+        app_mock.shutdown = AsyncMock()
+        app_mock.updater = MagicMock()
+        app_mock.updater.start_polling = AsyncMock()
+        app_mock.updater.stop = AsyncMock()
+
         handlers = {}
         
         # When CommandHandler("status", status_cmd) is called, it returns a mock
