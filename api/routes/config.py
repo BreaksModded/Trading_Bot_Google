@@ -8,6 +8,24 @@ from api.middleware import verify_token
 
 router = APIRouter()
 
+SENSITIVE_KEYWORDS = ("secret", "key", "password", "token")
+
+def redact_settings(data: dict) -> dict:
+    if not isinstance(data, dict):
+        return data
+        
+    result = {}
+    for k, v in data.items():
+        if any(kw in str(k).lower() for kw in SENSITIVE_KEYWORDS):
+            result[k] = "***"
+        elif isinstance(v, dict):
+            result[k] = redact_settings(v)
+        elif isinstance(v, list) and all(isinstance(x, dict) for x in v):
+            result[k] = [redact_settings(x) for x in v]
+        else:
+            result[k] = v
+    return result
+
 
 class GridConfigUpdate(BaseModel):
     """Schema for updating grid configuration."""
@@ -28,8 +46,8 @@ async def get_current_config(request: Request, username: str = Depends(verify_to
     state = request.app.state
     if hasattr(state, "settings") and state.settings:
         if hasattr(state.settings, "to_grid_dict"):
-            return state.settings.to_grid_dict()
-        return state.settings.model_dump()
+            return redact_settings(state.settings.to_grid_dict())
+        return redact_settings(state.settings.model_dump())
     return {}
 
 
@@ -66,8 +84,8 @@ async def update_config(
     val = state.settings.to_grid_dict() if hasattr(state.settings, "to_grid_dict") else state.settings.model_dump()
     return {
         "message": "Configuration updated",
-        "changes": changes,
-        "current": val,
+        "changes": redact_settings(changes),
+        "current": redact_settings(val),
     }
 
 
@@ -123,5 +141,8 @@ async def get_config_history(request: Request, username: str = Depends(verify_to
     # Fallback to empty if not implemented
     if hasattr(state.db, "get_config_snapshots"):
         snapshots = state.db.get_config_snapshots(limit=20)
-        return {"snapshots": [s.model_dump() if hasattr(s, "model_dump") else s for s in snapshots]}
+        return {"snapshots": [
+            redact_settings(s.model_dump() if hasattr(s, "model_dump") else s) 
+            for s in snapshots
+        ]}
     return {"snapshots": []}

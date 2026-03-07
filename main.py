@@ -1739,7 +1739,7 @@ async def run_bot() -> None:
         domain=settings.exchange.domain,
         tld=settings.exchange.tld,
     )
-    logger.info(f"BOOT ENV: domain={settings.exchange.domain}, tld={settings.exchange.tld}, api_key={settings.exchange.api_key[:5]}...")
+    logger.info(f"BOOT ENV: domain={settings.exchange.domain}, tld={settings.exchange.tld}")
 
     strategies: dict[str, GridStrategy] = {}
     order_managers: dict[str, OrderManager] = {}

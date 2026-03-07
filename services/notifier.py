@@ -91,6 +91,9 @@ class TelegramNotifier:
             return
 
         async def status_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+            if str(update.effective_chat.id) != str(self._chat_id):
+                await update.message.reply_text("⛔ Unauthorized")
+                return
             state = db.get_bot_state()
             await update.message.reply_text(
                 f"Estado: {state['status']}\n"
@@ -99,18 +102,30 @@ class TelegramNotifier:
             )
 
         async def stop_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+            if str(update.effective_chat.id) != str(self._chat_id):
+                await update.message.reply_text("⛔ Unauthorized")
+                return
             db.enqueue_command("stop")
             await update.message.reply_text("Comando STOP encolado.")
 
         async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+            if str(update.effective_chat.id) != str(self._chat_id):
+                await update.message.reply_text("⛔ Unauthorized")
+                return
             db.enqueue_command("start")
             await update.message.reply_text("Comando START encolado.")
 
         async def resume_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+            if str(update.effective_chat.id) != str(self._chat_id):
+                await update.message.reply_text("⛔ Unauthorized")
+                return
             db.enqueue_command("resume")
             await update.message.reply_text("Comando RESUME encolado.")
 
         async def config_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+            if str(update.effective_chat.id) != str(self._chat_id):
+                await update.message.reply_text("⛔ Unauthorized")
+                return
             snapshot = db.get_latest_config_snapshot()
             values = snapshot["values_json"] if snapshot else {}
             await update.message.reply_text(f"Config actual:\n{values}")

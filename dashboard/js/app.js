@@ -15,7 +15,7 @@ const APP = {
     selectedInterval: '60',
     activeSymbolsCache: [],
     username: localStorage.getItem('bot_user') || null,
-    password: localStorage.getItem('bot_pass') || null,
+    password: sessionStorage.getItem('bot_pass') || null,
 };
 
 // ── API Client ───────────────────────────────────────────────
@@ -47,7 +47,7 @@ async function login() {
         APP.password = pass;
         localStorage.setItem('bot_token', APP.token);
         localStorage.setItem('bot_user', user);
-        localStorage.setItem('bot_pass', pass);
+        sessionStorage.setItem('bot_pass', pass);
         document.getElementById('login-modal').style.display = 'none';
         initDashboard();
     } else {
@@ -63,7 +63,7 @@ function logout() {
     APP.password = null;
     localStorage.removeItem('bot_token');
     localStorage.removeItem('bot_user');
-    localStorage.removeItem('bot_pass');
+    sessionStorage.removeItem('bot_pass');
     document.getElementById('login-modal').style.display = 'flex';
     if (APP.refreshInterval) clearInterval(APP.refreshInterval);
     if (APP.ws) APP.ws.close();
@@ -312,11 +312,16 @@ function updateKPIs(data) {
 // ── WebSocket ────────────────────────────────────────────────
 function connectWebSocket() {
     const protocol = location.protocol === 'https:' ? 'wss' : 'ws';
-    const wsUrl = `${protocol}://${location.host}/ws?username=${encodeURIComponent(APP.username || '')}&password=${encodeURIComponent(APP.password || '')}`;
+    const wsUrl = `${protocol}://${location.host}/ws?username=${encodeURIComponent(APP.username || '')}`;
     APP.ws = new WebSocket(wsUrl);
 
     APP.ws.onopen = () => {
         console.log('WebSocket connected');
+        // FIX-4 Send auth message
+        APP.ws.send(JSON.stringify({ 
+            type: "auth", 
+            password: APP.password 
+        }));
         APP.ws.send(JSON.stringify({ type: 'subscribe', channel: 'all' }));
     };
 

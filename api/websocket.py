@@ -75,17 +75,36 @@ async def websocket_endpoint(websocket: WebSocket):
     - Server → Client: status updates, price data, trade events
     - Client → Server: commands (subscribe/unsubscribe to specific channels)
 
-    Authentication: pass ?username=X&password=Y as query params.
+    Authentication: 
+    - username via query param
+    - password via initial JSON message `{"type": "auth", "password": "..."}`
     """
-    # M15: authenticate via query params
     settings = websocket.app.state.settings
     ws_user = websocket.query_params.get("username", "")
-    ws_pass = websocket.query_params.get("password", "")
-    if ws_user != settings.dashboard.username or ws_pass != settings.dashboard.password:
+    
+    if ws_user != settings.dashboard.username:
         await websocket.close(code=1008)
         return
 
-    await manager.connect(websocket)
+    await websocket.accept()
+    
+    # Wait for auth message within 5 seconds
+    try:
+        data = await asyncio.wait_for(websocket.receive_text(), timeout=5.0)
+        message = json.loads(data)
+        if message.get("type") != "auth" or message.get("password") != settings.dashboard.password:
+            await websocket.close(code=1008)
+            return
+    except (asyncio.TimeoutError, json.JSONDecodeError, KeyError, Exception) as e:
+        logger.warning(f"WebSocket auth failed or timeout: {e}")
+        try:
+            await websocket.close(code=1008)
+        except Exception:
+            pass
+        return
+
+    manager.active_connections.append(websocket)
+    logger.info(f"WebSocket client connected ({len(manager.active_connections)} total)")
 
     try:
         while True:
