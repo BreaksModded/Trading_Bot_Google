@@ -168,10 +168,11 @@ async def test_risk_status_persisted_on_every_call(mock_bot):
     """set_runtime_config("risk_status", ...) is called on every evaluate cycle."""
     decision = RiskDecision(allow_trading=True, emergency_stop=False, reason="ok")
     await TradingBot._handle_risk_decision(mock_bot, decision)
-    mock_bot.db.set_runtime_config.assert_called_once()
-    call_args = mock_bot.db.set_runtime_config.call_args[0]
-    assert call_args[0] == "risk_status"
-    assert call_args[1]["available"] is True
+    # Now called twice: once for "risk_status", once for "positions"
+    assert mock_bot.db.set_runtime_config.call_count == 2
+    first_call = mock_bot.db.set_runtime_config.call_args_list[0][0]
+    assert first_call[0] == "risk_status"
+    assert first_call[1]["available"] is True
 
 
 @pytest.mark.asyncio
@@ -320,7 +321,8 @@ async def test_no_log_on_normal_ok_cycle(mock_bot):
     decision = RiskDecision(allow_trading=True, emergency_stop=False, reason="ok")
     await TradingBot._handle_risk_decision(mock_bot, decision)
     mock_bot.db.log_circuit_breaker.assert_not_called()
-    mock_bot.db.set_runtime_config.assert_called_once()
+    # set_runtime_config called twice: "risk_status" + "positions"
+    assert mock_bot.db.set_runtime_config.call_count == 2
 
 
 @pytest.mark.asyncio

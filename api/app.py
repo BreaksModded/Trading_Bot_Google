@@ -187,6 +187,7 @@ def _build_overview_payload(app: FastAPI) -> dict[str, Any]:
         "quote_coin": quote_coin,
         "active_symbols": active_symbols,
         "latest_indicators": latest_indicators,
+        "positions": db.get_runtime_config("positions") or {},
     }
 
 

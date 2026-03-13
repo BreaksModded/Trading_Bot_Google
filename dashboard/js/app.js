@@ -882,6 +882,7 @@ function updateGridPanel(data) {
 
     if (!sells.length && !buys.length) {
         container.innerHTML = '<div style="text-align:center;color:var(--text-muted);padding:40px;">Sin grid activo para este par</div>';
+        _updateFcBanner(data, currentPrice);
         return;
     }
 
@@ -936,6 +937,37 @@ function updateGridPanel(data) {
     });
 
     container.innerHTML = html;
+    _updateFcBanner(data, currentPrice);
+}
+
+function _updateFcBanner(data, currentPrice) {
+    const fcBannerEl = document.getElementById('fc-banner');
+    if (!fcBannerEl) return;
+    const pos = (data && data.positions && data.positions[APP.selectedSymbol]) || {};
+    const posQty = pos.qty || 0;
+    const posAvg = pos.avg_cost || 0;
+    if (posQty > 0.000001) {
+        const botStatus = APP._lastBotStatus || 'stopped';
+        const disabled = botStatus !== 'running';
+        const pnlStr = currentPrice > 0 && posAvg > 0
+            ? (() => { const p = (currentPrice - posAvg) * posQty; return ` | PnL: <span style="color:${p >= 0 ? 'var(--green)' : 'var(--red)'}">$${p.toFixed(2)}</span>`; })()
+            : '';
+        fcBannerEl.style.display = 'block';
+        fcBannerEl.innerHTML = `
+            <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px;">
+                <span style="font-size:0.8rem;">
+                    Posición abierta: <strong>${posQty.toFixed(6)}</strong> | Avg: <strong>$${posAvg.toLocaleString(undefined,{maximumFractionDigits:4})}</strong>${pnlStr}
+                </span>
+                <button
+                    onclick="${disabled ? '' : `forceCloseSymbol('${APP.selectedSymbol}', ${posQty}, ${posAvg}, ${currentPrice})`}"
+                    ${disabled ? 'disabled title="El bot debe estar RUNNING"' : ''}
+                    style="padding:5px 14px;font-size:0.75rem;font-weight:700;text-transform:uppercase;border:none;border-radius:4px;cursor:${disabled ? 'not-allowed' : 'pointer'};background:${disabled ? 'rgba(239,68,68,0.25)' : 'rgba(239,68,68,0.85)'};color:${disabled ? 'rgba(255,255,255,0.4)' : '#fff'};">
+                    Force Close
+                </button>
+            </div>`;
+    } else {
+        fcBannerEl.style.display = 'none';
+    }
 }
 
 function renderSymbolTabs(symbols, status) {
@@ -992,17 +1024,86 @@ function updateProgressBar(id, value, limit) {
     bar.className = 'progress-fill ' + (pct > 70 ? 'progress-danger' : pct > 40 ? 'progress-warning' : 'progress-safe');
 }
 
+// ── Force Close ───────────────────────────────────────────────
+async function forceCloseSymbol(symbol, qty, avgCost, currentPrice) {
+    const botStatus = APP._lastBotStatus || 'stopped';
+    if (botStatus !== 'running') {
+        alert('El bot no está en estado RUNNING. No se puede enviar force close.');
+        return;
+    }
+
+    const pnlUsdt = currentPrice > 0 && avgCost > 0
+        ? ((currentPrice - avgCost) * qty)
+        : null;
+    const pnlStr = pnlUsdt !== null
+        ? `\nPnL estimado: $${pnlUsdt.toFixed(2)} (${pnlUsdt >= 0 ? 'ganancia' : 'pérdida'})`
+        : '';
+
+    const msg = `⚠️ FORCE CLOSE: ${symbol}\n\n` +
+        `Posición: ${qty.toFixed(8)} unidades\n` +
+        `Costo promedio: $${avgCost.toLocaleString(undefined, { maximumFractionDigits: 4 })}\n` +
+        `Precio actual: $${currentPrice > 0 ? currentPrice.toLocaleString(undefined, { maximumFractionDigits: 2 }) : 'desconocido'}` +
+        pnlStr +
+        `\n\n¿Confirmar venta al mercado y resetear grid? (~15s)`;
+
+    if (!confirm(msg)) return;
+
+    const result = await api(`/trading/force-close/${symbol}`, { method: 'POST' });
+    if (result && result.status === 'command_queued') {
+        _showToast(`Force close enviado para ${symbol}. Ejecutando en ~15s.`);
+    } else {
+        alert(`Error al enviar force close: ${result?.message || 'Error desconocido'}`);
+    }
+}
+
+function _showToast(message) {
+    let toast = document.getElementById('_fc-toast');
+    if (!toast) {
+        toast = document.createElement('div');
+        toast.id = '_fc-toast';
+        toast.style.cssText = 'position:fixed;bottom:24px;right:24px;background:#1e40af;color:#fff;padding:12px 20px;border-radius:8px;font-size:0.85rem;z-index:9999;box-shadow:0 4px 12px rgba(0,0,0,0.4);transition:opacity 0.4s;';
+        document.body.appendChild(toast);
+    }
+    toast.textContent = message;
+    toast.style.opacity = '1';
+    clearTimeout(toast._timer);
+    toast._timer = setTimeout(() => { toast.style.opacity = '0'; }, 4000);
+}
+
 // ── New UX Redesign Features ──────────────────────────────────
 function renderMiniCards(data) {
     const container = document.getElementById('mini-cards-container');
     if (!container || !data.active_symbols) return;
 
+    const positions = data.positions || {};
+    const botStatus = data.bot_state?.status || 'stopped';
+    APP._lastBotStatus = botStatus;
+
     let html = '';
     data.active_symbols.forEach(sym => {
         const inds = (data.latest_indicators || {})[sym] || {};
+        const pos = positions[sym] || {};
         const priceStr = inds.current_price ? `$${inds.current_price.toLocaleString(undefined, { maximumFractionDigits: 2 })}` : '--';
         const trend = inds.trend === 'long' ? 'alcista' : (inds.trend === 'short' ? 'bajista' : 'neutral');
         const color = inds.trend === 'long' ? 'var(--green)' : (inds.trend === 'short' ? 'var(--red)' : 'var(--text-muted)');
+
+        const qty = pos.qty || 0;
+        const avgCost = pos.avg_cost || 0;
+        const currentPrice = inds.current_price || 0;
+        const hasPosition = qty > 0.000001;
+
+        let fcBtn = '';
+        if (hasPosition) {
+            const disabled = botStatus !== 'running';
+            const title = disabled ? 'El bot debe estar RUNNING para ejecutar force close' : `Vender ${qty.toFixed(6)} al mercado`;
+            fcBtn = `<button
+                onclick="${disabled ? '' : `forceCloseSymbol('${sym}', ${qty}, ${avgCost}, ${currentPrice})`}"
+                ${disabled ? 'disabled' : ''}
+                title="${title}"
+                style="margin-top:4px;width:100%;padding:4px 0;font-size:0.7rem;font-weight:700;text-transform:uppercase;letter-spacing:0.05em;border:none;border-radius:4px;cursor:${disabled ? 'not-allowed' : 'pointer'};background:${disabled ? 'rgba(239,68,68,0.2)' : 'rgba(239,68,68,0.8)'};color:${disabled ? 'rgba(255,255,255,0.4)' : '#fff'};">
+                Force Close (${qty.toFixed(4)})
+            </button>`;
+        }
 
         html += `
         <div class="kpi-card" style="flex:1; min-width:180px; display:flex; flex-direction:column; gap:8px;">
@@ -1014,6 +1115,7 @@ function renderMiniCards(data) {
                 <span>Precio: ${priceStr}</span>
                 <span>ADX: ${inds.adx ? inds.adx.toFixed(1) : '--'}</span>
             </div>
+            ${fcBtn}
         </div>
         `;
     });

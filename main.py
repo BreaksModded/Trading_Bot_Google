@@ -1450,6 +1450,15 @@ class TradingBot:
         except Exception as _rs_err:
             logger.debug("[risk] Failed to persist risk status: {}", _rs_err)
 
+        try:
+            positions = {
+                sym: {"qty": mgr._position_qty, "avg_cost": mgr._avg_cost}
+                for sym, mgr in self.order_managers.items()
+            }
+            self.db.set_runtime_config("positions", positions)
+        except Exception as _pos_err:
+            logger.debug("[risk] Failed to persist positions: {}", _pos_err)
+
         # ── Emergency stop (drawdown, daily loss, or sustained price shock) ──
         if decision.emergency_stop:
             # Classify event type and extract trigger value from reason string
@@ -1618,6 +1627,61 @@ class TradingBot:
 
     # ── Control Commands ──────────────────────────────────────────────
 
+    async def _force_close_symbol(self, symbol: str) -> None:
+        """Cancel all orders for *symbol*, market-sell any open position, reset grid.
+
+        The bot continues running for all other symbols. The affected symbol's
+        placement cooldown is cleared so the grid can rebuild on the next cycle.
+        """
+        _MIN_MARKET_SELL_QTY = 0.00001
+        manager = self.order_managers.get(symbol)
+        if not manager:
+            logger.warning("[force_close] {} not found in active managers.", symbol)
+            return
+
+        await self._log_and_notify(
+            "WARNING", "bot",
+            f"Force close initiated for {symbol}. Cancelling orders and selling position.",
+        )
+
+        # 1. Cancel all open orders for this symbol
+        try:
+            await manager.cancel_all()
+            logger.info("[force_close] {} — All orders cancelled.", symbol)
+        except Exception as exc:
+            logger.error("[force_close] {} — cancel_all failed: {}.", symbol, exc)
+
+        # 2. Market-sell any open inventory position
+        qty = manager._position_qty
+        if qty >= _MIN_MARKET_SELL_QTY:
+            try:
+                await manager.exchange.place_market_order(
+                    symbol=symbol, side="Sell", qty=qty,
+                )
+                logger.warning(
+                    "[force_close] {} — Market sell executed: {:.6f} units.", symbol, qty,
+                )
+                async with manager._lock:
+                    manager._position_qty = 0.0
+                    manager._avg_cost = 0.0
+            except Exception as exc:
+                logger.error(
+                    "[force_close] {} — Market sell FAILED: {}. Manual check required.",
+                    symbol, exc,
+                )
+        elif qty > 0:
+            logger.warning(
+                "[force_close] {} — qty {:.8f} below minimum — skipping market sell.", symbol, qty,
+            )
+
+        # 3. Clear placement cooldown so the grid rebuilds on the next cycle
+        self._placement_cooldown_until.pop(symbol, None)
+
+        await self._log_and_notify(
+            "INFO", "bot",
+            f"Force close completed for {symbol}. Grid will rebuild on next cycle (~15s).",
+        )
+
     async def _process_control_commands(self) -> None:
         commands = self.db.fetch_pending_commands(limit=20)
         for command in commands:
@@ -1646,6 +1710,11 @@ class TradingBot:
                 elif action == "pause_hours":
                     hours = int(payload.get("hours", 24))
                     self.risk_manager.force_pause(hours=hours)
+                elif action == "force_close_symbol":
+                    sym = str(payload.get("symbol", "")).upper()
+                    if not sym:
+                        raise ValueError("force_close_symbol requires 'symbol' in payload")
+                    await self._force_close_symbol(sym)
                 self.db.mark_command_processed(command_id, status="processed")
             except Exception as exc:
                 self.db.mark_command_processed(command_id, status="failed")

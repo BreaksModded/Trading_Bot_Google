@@ -84,6 +84,7 @@ async def get_bot_status(request: Request, username: str = Depends(verify_token)
         "quote_coin": quote_coin,
         "active_symbols": active_symbols,
         "latest_indicators": latest_indicators,
+        "positions": db.get_runtime_config("positions") or {},
     }
 
 

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from fastapi import APIRouter, Depends, Query, Request
+from pydantic import BaseModel
 
 from api.middleware import verify_token
 
@@ -85,4 +86,28 @@ async def get_trade_history(
         "total": total,
         "limit": limit,
         "offset": offset,
+    }
+
+
+@router.post("/trading/force-close/{symbol}")
+async def force_close_symbol(
+    symbol: str,
+    request: Request,
+    username: str = Depends(verify_token),
+):
+    """Enqueue a force-close command for a specific symbol.
+
+    The bot will cancel all orders for that symbol, market-sell any open
+    inventory position, then clear the placement cooldown so the grid
+    rebuilds on the next cycle (~15s).
+    """
+    db = request.app.state.db
+    sym = symbol.upper()
+    cmd_id = db.enqueue_command("force_close_symbol", payload={"symbol": sym})
+    return {
+        "status": "command_queued",
+        "command": "force_close_symbol",
+        "symbol": sym,
+        "command_id": cmd_id,
+        "message": f"Force close queued for {sym}. Executing in ~15s.",
     }
