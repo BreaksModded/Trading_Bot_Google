@@ -750,7 +750,20 @@ class TradingBot:
 
             # Calculate sell price: breakeven + spacing
             spacing = manager._sell_spacing_pct or manager.default_spacing_pct
-            target_price = manager._avg_cost * (1 + spacing)
+            avg_cost_price = manager._avg_cost * (1 + spacing)
+            
+            # FIX-BUG-7: Ensure hedge SELL is not below current market price
+            # Bybit rejects limit sells that are too far below the market.
+            min_price_buffer = 0.001  # 0.1% buffer above market
+            market_price_floor = signal.current_price * (1 + min_price_buffer)
+            target_price = max(avg_cost_price, market_price_floor)
+
+            if target_price == market_price_floor and market_price_floor > avg_cost_price:
+                logger.info(
+                    "[HEDGE] {} price adjusted to market floor: "
+                    "avg_cost_price={:.4f} < current={:.4f}, using {:.4f}",
+                    symbol, avg_cost_price, signal.current_price, target_price
+                )
 
             # Guard 6: check notional minimum
             notional = manager._position_qty * target_price
