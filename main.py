@@ -445,18 +445,11 @@ class TradingBot:
                     logger.info(
                         "[iter {}] RISK-BLOCK -- {}", iteration, risk_decision.reason,
                     )
-                    await self._persist_metrics(equity=equity)
-                    await self._update_heartbeat()
-                    await self.health_monitor.ping_if_due()
-                    
-                    # WKS-2: Wait for WS trigger or 60s max heartbeat timeout
-                    self._signal_eval_event.clear()
-                    try:
-                        await asyncio.wait_for(self._signal_eval_event.wait(), timeout=60.0)
-                    except TimeoutError:
-                        pass
-                    continue
 
+                # ── Maintenance: ALWAYS runs (even during RISK-BLOCK) ─────
+                # FIX-A: sync, stale-check, stop-loss, hedging, and grid
+                # refresh must execute regardless of risk state.  Only NEW
+                # grid placements are gated by allow_trading.
 
                 # Sync tracked orders with exchange
                 sync_results = await asyncio.gather(
@@ -508,11 +501,17 @@ class TradingBot:
                 # Step 4c: Hedge unhedged inventory (gate-free coverage SELLs)
                 await self._hedge_unhedged_inventory(signals=signals)
 
-                # Place new grids where needed
-                # Phase J: skip placement during price shock pause; sync and
-                # fills (via WebSocket) continue running normally.
-                if not risk_decision.block_new_grids:
+                # ── New grid placement: ONLY when trading is allowed ──────
+                # FIX-A: skip new grids when RISK-BLOCKed; also skip on
+                # price-shock pause (block_new_grids).
+                if risk_decision.allow_trading and not risk_decision.block_new_grids:
                     await self._place_new_grids(signals=signals, balance=free_balance)
+                elif not risk_decision.allow_trading:
+                    # RISK-BLOCK active — maintenance already ran above
+                    logger.info(
+                        "[iter {}] New grids skipped — RISK-BLOCK active ({})",
+                        iteration, risk_decision.reason,
+                    )
                 else:
                     logger.info(
                         "[iter {}] Grid placements skipped — price shock pause active ({})",

@@ -184,31 +184,28 @@ def evaluate_safety_gates(
     skip_if_orders_above: int = 2,
 ) -> tuple[bool, list[RefreshGateResult]]:
     """
-    Evaluate all 5 Phase H safety gates.
+    Evaluate Phase H safety gates for grid refresh.
 
-    Evaluation order: G5 (cheapest) → G3 → G4 → G1 → G2 (most expensive).
-    All gates are evaluated for logging even if an earlier one fails.
+    FIX-C: Reduced from 5 gates to 3.  G4 (min_move) and G5 (order_count)
+    were removed:
+    - G4 (min_move) was redundant with StalenessResult which already evaluates
+      price deviation. It blocked Time-Refresh in legitimate lateral markets
+      where recalibrating ATR spacing is the whole point of the age trigger.
+    - G5 (order_count) caused deadlocks: old buy orders at stale prices
+      counted as "grid still in range" preventing their own cancellation.
+      StalenessResult already evaluates order age and price deviation.
+
+    Remaining gates:
+    - G1 (ADX trend): Do not refresh into a strong downtrend (falling knife)
+    - G2 (inventory cap): Do not over-allocate capital to one pair
+    - G3 (cooldown): Prevent API spam from rapid refresh cycles
 
     Returns:
         (all_passed, list of gate results)
     """
     results: list[RefreshGateResult] = []
 
-    # G5 — Open Orders Threshold (cheapest check first)
-    g5_passed = open_buy_count <= skip_if_orders_above
-    results.append(RefreshGateResult(
-        gate_name="G5_ORDER_COUNT",
-        passed=g5_passed,
-        reason=(
-            f"open_buys={open_buy_count} <= limit={skip_if_orders_above}"
-            if g5_passed
-            else f"BLOCKED: open_buys={open_buy_count} > limit={skip_if_orders_above} (grid still in range)"
-        ),
-        value=float(open_buy_count),
-        threshold=float(skip_if_orders_above),
-    ))
-
-    # G3 — Cooldown
+    # G3 — Cooldown (cheapest check first)
     g3_passed = time_since_last_refresh_s >= cooldown_seconds
     results.append(RefreshGateResult(
         gate_name="G3_COOLDOWN",
@@ -220,20 +217,6 @@ def evaluate_safety_gates(
         ),
         value=time_since_last_refresh_s,
         threshold=float(cooldown_seconds),
-    ))
-
-    # G4 — Minimum Price Movement
-    g4_passed = price_move_since_last_pct >= min_move_pct
-    results.append(RefreshGateResult(
-        gate_name="G4_MIN_MOVE",
-        passed=g4_passed,
-        reason=(
-            f"move={price_move_since_last_pct:.4f} >= min={min_move_pct:.4f}"
-            if g4_passed
-            else f"BLOCKED: move={price_move_since_last_pct:.4f} < min={min_move_pct:.4f} (negligible price change)"
-        ),
-        value=price_move_since_last_pct,
-        threshold=min_move_pct,
     ))
 
     # G1 — ADX Trend Filter

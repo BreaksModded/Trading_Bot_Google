@@ -80,7 +80,11 @@ def compute_volume_ratio(series: pd.Series, period: int = 20) -> pd.Series:
     if period <= 0:
         raise ValueError("Volume ratio period must be positive.")
     median_vol = series.rolling(window=period, min_periods=1).median().replace(0, float('nan'))
-    return (series / median_vol).fillna(0.0)
+    # FIX-B: fillna(1.0) instead of fillna(0.0).
+    # 1.0 = volume equals median = neutral; prevents blocking grid placement
+    # when exchange returns NaN due to timeout or empty candle data.
+    # Real low-volume conditions produce ratio < 1.0 (not NaN), unaffected.
+    return (series / median_vol).fillna(1.0)
 
 
 def compute_rsi(series: pd.Series, period: int = 14) -> pd.Series:

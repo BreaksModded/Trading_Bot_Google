@@ -219,62 +219,24 @@ class TestSafetyGates:
         g3 = next(g for g in results if g.gate_name == "G3_COOLDOWN")
         assert g3.passed is True
 
-    # G4 — Minimum Price Movement
-
-    def test_gate4_blocks_small_move(self):
-        """G4 blocks when price has barely moved since last refresh."""
-        passed, results = evaluate_safety_gates(
-            **self._base_kwargs(price_move_since_last_pct=0.005, min_move_pct=0.02)
-        )
-        assert passed is False
-        g4 = next(g for g in results if g.gate_name == "G4_MIN_MOVE")
-        assert g4.passed is False
-
-    def test_gate4_allows_sufficient_move(self):
-        """G4 allows when price has moved enough."""
-        passed, results = evaluate_safety_gates(
-            **self._base_kwargs(price_move_since_last_pct=0.03, min_move_pct=0.02)
-        )
-        g4 = next(g for g in results if g.gate_name == "G4_MIN_MOVE")
-        assert g4.passed is True
-
-    # G5 — Open Orders Threshold
-
-    def test_gate5_blocks_enough_orders(self):
-        """G5 blocks when too many buy orders are still open (grid in range)."""
-        passed, results = evaluate_safety_gates(
-            **self._base_kwargs(open_buy_count=4, skip_if_orders_above=2)
-        )
-        assert passed is False
-        g5 = next(g for g in results if g.gate_name == "G5_ORDER_COUNT")
-        assert g5.passed is False
-
-    def test_gate5_allows_few_orders(self):
-        """G5 allows when few buy orders remain (grid out of range)."""
-        passed, results = evaluate_safety_gates(
-            **self._base_kwargs(open_buy_count=1, skip_if_orders_above=2)
-        )
-        g5 = next(g for g in results if g.gate_name == "G5_ORDER_COUNT")
-        assert g5.passed is True
+    # G4 and G5 removed in FIX-C — see test_fix_c_safety_gates.py
 
     # All gates combined
 
     def test_all_gates_pass(self):
-        """When all conditions are favorable, all 5 gates pass."""
+        """When all conditions are favorable, all 3 remaining gates pass."""
         passed, results = evaluate_safety_gates(**self._base_kwargs())
         assert passed is True
-        assert len(results) == 5
+        assert len(results) == 3
         assert all(g.passed for g in results)
 
     def test_all_gates_logged(self):
-        """Every gate produces a named result for audit."""
+        """Every remaining gate produces a named result for audit."""
         _, results = evaluate_safety_gates(**self._base_kwargs())
         gate_names = [g.gate_name for g in results]
         assert "G1_ADX_TREND" in gate_names
         assert "G2_INVENTORY" in gate_names
         assert "G3_COOLDOWN" in gate_names
-        assert "G4_MIN_MOVE" in gate_names
-        assert "G5_ORDER_COUNT" in gate_names
 
     def test_multiple_gates_fail_first_reported(self):
         """When multiple gates fail, all are evaluated (not short-circuited)."""
@@ -282,12 +244,11 @@ class TestSafetyGates:
             **self._base_kwargs(
                 adx_value=45.0, trend_bias="short",  # G1 fails
                 inventory_ratio=0.60,                  # G2 fails
-                open_buy_count=5,                      # G5 fails
             )
         )
         assert passed is False
         failed = [g for g in results if not g.passed]
-        assert len(failed) >= 3
+        assert len(failed) >= 2
 
 
 # ── should_refresh guardrails ────────────────────────────────────────
