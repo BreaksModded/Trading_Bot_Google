@@ -11,7 +11,7 @@ from api.middleware import verify_token
 
 router = APIRouter()
 
-_DUST_THRESHOLD = 0.0001
+_DUST_THRESHOLD = 1e-6
 
 
 @router.get("/portfolio/holdings")
@@ -36,13 +36,12 @@ async def get_holdings(
 
     for symbol, pos in positions.items():
         qty = float(pos.get("qty", 0.0))
-        if qty < _DUST_THRESHOLD:
+        inds = indicators.get(symbol, {})
+        current_price = float(inds.get("current_price", 0.0))
+        if qty < _DUST_THRESHOLD or (qty * current_price) < 1.0:
             continue
 
         avg_cost = float(pos.get("avg_cost", 0.0))
-
-        inds = indicators.get(symbol, {})
-        current_price = float(inds.get("current_price", 0.0))
 
         value_usdt = qty * current_price if current_price > 0 else 0.0
 
