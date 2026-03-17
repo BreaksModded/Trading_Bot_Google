@@ -17,7 +17,8 @@
       "Bash(python -m pytest tests/unit/ --collect-only -q)",
       "Bash(python -m pytest tests/ --co -q)",
       "Bash(python -m pytest tests/unit/test_portfolio_holdings.py --co -q)",
-      "Bash(python -m pytest tests/unit/test_fix_8_hedge_balance.py --co -q)"
+      "Bash(python -m pytest tests/unit/test_fix_8_hedge_balance.py --co -q)",
+      "Bash(python -m pytest tests/ -q)"
     ]
   }
 }

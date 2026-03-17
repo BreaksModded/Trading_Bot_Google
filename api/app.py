@@ -111,15 +111,13 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(dashboard_router, prefix="/api")
     app.include_router(trading_router, prefix="/api")
 
+    from api.routes.portfolio import router as portfolio_router
+    app.include_router(portfolio_router, prefix="/api")
+
     from api.websocket import router as ws_router
     app.include_router(ws_router)
 
     # Include additional route modules if they exist
-    try:
-        from api.routes.portfolio import router as portfolio_router
-        app.include_router(portfolio_router, prefix="/api")
-    except (ImportError, Exception):
-        pass
     try:
         from api.routes.backtest import router as backtest_router
         app.include_router(backtest_router, prefix="/api")

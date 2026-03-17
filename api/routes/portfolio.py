@@ -21,30 +21,26 @@ async def get_holdings(
 ) -> dict[str, Any]:
     """Return current holdings snapshot built from in-memory bot data.
 
-    Reads ``portfolio_snapshot`` and ``latest_indicators`` from runtime_config
-    (both written by the bot each cycle).  Never calls the exchange.
+    Reads ``positions`` (qty + avg_cost per symbol) and ``latest_indicators``
+    (current_price per symbol) from runtime_config — both written by the bot
+    each cycle.  Never calls the exchange.
     """
     db = request.app.state.db
 
-    snapshot: dict[str, Any] = db.get_runtime_config("portfolio_snapshot") or {}
+    positions: dict[str, Any] = db.get_runtime_config("positions") or {}
     indicators: dict[str, Any] = db.get_runtime_config("latest_indicators") or {}
-
-    raw_holdings: dict[str, Any] = snapshot.get("holdings", {})
-    free_usdt: float = float(snapshot.get("free_usdt", 0.0))
-    updated_at: str = snapshot.get("updated_at", datetime.now(UTC).isoformat())
 
     holdings: list[dict[str, Any]] = []
     total_value = 0.0
     total_pnl = 0.0
 
-    for symbol, h in raw_holdings.items():
-        qty = float(h.get("qty", 0.0))
+    for symbol, pos in positions.items():
+        qty = float(pos.get("qty", 0.0))
         if qty < _DUST_THRESHOLD:
             continue
 
-        avg_cost = float(h.get("avg_cost", 0.0))
+        avg_cost = float(pos.get("avg_cost", 0.0))
 
-        # current_price from latest_indicators (bot already knows it, no exchange call)
         inds = indicators.get(symbol, {})
         current_price = float(inds.get("current_price", 0.0))
 
@@ -57,7 +53,6 @@ async def get_holdings(
             pnl_usdt = 0.0
             pnl_pct = 0.0
 
-        # Parse coin name from symbol (e.g. SOLUSDC → SOL, BTCUSDC → BTC)
         coin = _parse_coin(symbol)
 
         holdings.append({
@@ -69,19 +64,20 @@ async def get_holdings(
             "value_usdt": round(value_usdt, 4),
             "pnl_usdt": round(pnl_usdt, 4),
             "pnl_pct": round(pnl_pct, 4),
-            "has_sell_order": bool(h.get("has_sell_order", False)),
-            "sell_order_price": h.get("sell_order_price"),
+            "has_sell_order": False,
+            "sell_order_price": None,
         })
 
         total_value += value_usdt
         total_pnl += pnl_usdt
 
+    free_usdt = 0.0
     total_equity = total_value + free_usdt
     cost_basis = sum(
-        float(raw_holdings[s].get("avg_cost", 0.0)) * float(raw_holdings[s].get("qty", 0.0))
-        for s in raw_holdings
-        if float(raw_holdings[s].get("qty", 0.0)) >= _DUST_THRESHOLD
-        and float(raw_holdings[s].get("avg_cost", 0.0)) > 0
+        float(positions[s].get("avg_cost", 0.0)) * float(positions[s].get("qty", 0.0))
+        for s in positions
+        if float(positions[s].get("qty", 0.0)) >= _DUST_THRESHOLD
+        and float(positions[s].get("avg_cost", 0.0)) > 0
     )
     total_pnl_pct = (total_pnl / cost_basis * 100.0) if cost_basis > 0 else 0.0
 
@@ -91,7 +87,7 @@ async def get_holdings(
         "total_equity": round(total_equity, 4),
         "total_pnl_usdt": round(total_pnl, 4),
         "total_pnl_pct": round(total_pnl_pct, 4),
-        "updated_at": updated_at,
+        "updated_at": datetime.now(UTC).isoformat(),
     }
 
 
