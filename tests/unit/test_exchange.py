@@ -72,7 +72,7 @@ async def test_get_portfolio_equity_uses_cached_price_on_failure(exchange, mock_
     # 1. First call: Success, caches price at 50000
     with patch.object(exchange, "get_last_price", new_callable=AsyncMock) as mock_price:
         mock_price.return_value = 50000.0
-        total, free = await exchange.get_portfolio_equity(symbols=["BTCUSDT"])
+        total, free, balances = await exchange.get_portfolio_equity(symbols=["BTCUSDT"])
         
         assert total == 51000.0 # 1000 USDT + 50000 BTC
         assert free == 1000.0
@@ -81,7 +81,7 @@ async def test_get_portfolio_equity_uses_cached_price_on_failure(exchange, mock_
     # 2. Second call: Ticker fails, uses cached price
     with patch.object(exchange, "get_last_price", new_callable=AsyncMock) as mock_price:
         mock_price.side_effect = Exception("API Timeout")
-        total, free = await exchange.get_portfolio_equity(symbols=["BTCUSDT"])
+        total, free, balances = await exchange.get_portfolio_equity(symbols=["BTCUSDT"])
         
         assert total == 51000.0
         assert exchange._price_fail_counts["BTCUSDT"] == 1
@@ -102,7 +102,7 @@ async def test_get_portfolio_equity_skips_on_first_failure(exchange, mock_http):
     
     with patch.object(exchange, "get_last_price", new_callable=AsyncMock) as mock_price:
         mock_price.side_effect = Exception("API Timeout")
-        total, free = await exchange.get_portfolio_equity(symbols=["ETHUSDT"])
+        total, free, balances = await exchange.get_portfolio_equity(symbols=["ETHUSDT"])
         
         # Drops ETH valuation but keeps USDT
         assert total == 1000.0

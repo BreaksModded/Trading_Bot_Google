@@ -26,6 +26,7 @@ def create_bot(mock_exchange):
     """Create a minimal bot with an order manager."""
     bot = MagicMock()
     bot.exchange = mock_exchange  # Critical: _hedge_unhedged_inventory uses self.exchange
+    bot.quote_coin = "USDC"
     
     # We only need the order manager setup
     mgr = OrderManager(
@@ -69,7 +70,10 @@ class TestHedgePriceFloor:
         signal.current_price = 95.0
         
         # Run the hedge
-        await bot._hedge_unhedged_inventory(signals={"SOLUSDC": signal})
+        await bot._hedge_unhedged_inventory(
+            signals={"SOLUSDC": signal},
+            free_balances={"SOL": 10.0}
+        )
         
         # Verify the price used
         mock_exchange.place_limit_order.assert_called_once()
@@ -101,7 +105,10 @@ class TestHedgePriceFloor:
         signal.current_price = 95.0
         
         # Run the hedge
-        await bot._hedge_unhedged_inventory(signals={"SOLUSDC": signal})
+        await bot._hedge_unhedged_inventory(
+            signals={"SOLUSDC": signal},
+            free_balances={"SOL": 10.0}
+        )
         
         # Verify the price used
         mock_exchange.place_limit_order.assert_called_once()

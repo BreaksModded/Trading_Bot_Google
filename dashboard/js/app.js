@@ -77,6 +77,8 @@ function initDashboard() {
     connectWebSocket();
     refreshData();
     APP.refreshInterval = setInterval(refreshData, 15000);
+    fetchHoldings();
+    APP.holdingsInterval = setInterval(fetchHoldings, 30000);
     initCharts();
 }
 
@@ -102,7 +104,7 @@ function switchPanel(panelName) {
 }
 
 function onPanelSwitch(panel) {
-    if (panel === 'overview') loadActivityFeed();
+    if (panel === 'overview') { loadActivityFeed(); fetchHoldings(); }
     if (panel === 'trading') loadTrades();
     if (panel === 'performance') loadPerformance();
     if (panel === 'risk') loadRiskData();
@@ -1151,6 +1153,70 @@ async function loadActivityFeed() {
         </div>
         `;
     }).join('');
+}
+
+// ── Portfolio Holdings ────────────────────────────────────────
+async function fetchHoldings() {
+    const data = await api('/portfolio/holdings');
+    if (!data || !data.holdings) return;
+    renderHoldings(data);
+}
+
+function renderHoldings(data) {
+    const tbody = document.getElementById('holdings-tbody');
+    if (!tbody) return;
+
+    const POS_COLOR = '#00d4aa';
+    const NEG_COLOR = '#ff4757';
+    const WARN_COLOR = '#ffa502';
+
+    if (!data.holdings || data.holdings.length === 0) {
+        tbody.innerHTML = '<tr><td colspan="8" style="text-align:center;color:var(--text-muted);padding:20px;">Sin posiciones abiertas</td></tr>';
+    } else {
+        tbody.innerHTML = data.holdings.map(h => {
+            const pnlColor = h.pnl_usdt > 0 ? POS_COLOR : h.pnl_usdt < 0 ? NEG_COLOR : 'var(--text-muted)';
+            const pnlSign = h.pnl_usdt >= 0 ? '+' : '';
+            const priceStr = h.current_price > 0 ? `$${h.current_price.toLocaleString(undefined, {maximumFractionDigits:4})}` : '—';
+            const avgStr = h.avg_cost > 0 ? `$${h.avg_cost.toLocaleString(undefined, {maximumFractionDigits:4})}` : '—';
+
+            let sellCell;
+            if (h.has_sell_order && h.sell_order_price) {
+                sellCell = `<span style="color:${POS_COLOR};">$${parseFloat(h.sell_order_price).toLocaleString(undefined,{maximumFractionDigits:4})}</span>`;
+            } else {
+                sellCell = `<span style="color:${WARN_COLOR};">⚠ Sin cobertura</span>`;
+            }
+
+            return `<tr style="border-bottom:1px solid rgba(255,255,255,0.04);">
+                <td style="padding:7px 8px;font-weight:700;">${h.coin}</td>
+                <td style="padding:7px 8px;text-align:right;font-family:var(--font-mono);">${parseFloat(h.qty).toFixed(6)}</td>
+                <td style="padding:7px 8px;text-align:right;">${avgStr}</td>
+                <td style="padding:7px 8px;text-align:right;">${priceStr}</td>
+                <td style="padding:7px 8px;text-align:right;font-family:var(--font-mono);">$${parseFloat(h.value_usdt).toFixed(2)}</td>
+                <td style="padding:7px 8px;text-align:right;color:${pnlColor};font-family:var(--font-mono);">${pnlSign}$${parseFloat(h.pnl_usdt).toFixed(2)}</td>
+                <td style="padding:7px 8px;text-align:right;color:${pnlColor};">${pnlSign}${parseFloat(h.pnl_pct).toFixed(2)}%</td>
+                <td style="padding:7px 8px;text-align:right;">${sellCell}</td>
+            </tr>`;
+        }).join('');
+    }
+
+    // Footer
+    const freeEl = document.getElementById('free-usdt');
+    const totalEl = document.getElementById('total-equity');
+    const pnlEl = document.getElementById('total-pnl');
+    if (freeEl) freeEl.textContent = `$${parseFloat(data.free_usdt || 0).toFixed(2)}`;
+    if (totalEl) totalEl.textContent = `$${parseFloat(data.total_equity || 0).toFixed(2)}`;
+    if (pnlEl) {
+        const p = parseFloat(data.total_pnl_usdt || 0);
+        const sign = p >= 0 ? '+' : '';
+        pnlEl.textContent = `${sign}$${p.toFixed(2)} (${sign}${parseFloat(data.total_pnl_pct || 0).toFixed(2)}%)`;
+        pnlEl.style.color = p > 0 ? '#00d4aa' : p < 0 ? '#ff4757' : 'var(--text-muted)';
+    }
+
+    // Timestamp
+    const tsEl = document.getElementById('holdings-updated-at');
+    if (tsEl && data.updated_at) {
+        tsEl.textContent = `Actualizado: ${new Date(data.updated_at).toLocaleTimeString([], {hour:'2-digit',minute:'2-digit',second:'2-digit'})}`;
+    }
 }
 
 // ── Boot ─────────────────────────────────────────────────────

@@ -383,7 +383,7 @@ class TradingBot:
                 await asyncio.to_thread(self.db.set_runtime_config, "latest_indicators", indicators_dump)
 
                 # Risk evaluation — mark-to-market equity (R1 fix)
-                equity, free_balance = await self.exchange.get_portfolio_equity(
+                equity, free_balance, free_balances = await self.exchange.get_portfolio_equity(
                     symbols=self.symbols, quote_coin=self.quote_coin,
                 )
                 
@@ -462,6 +462,30 @@ class TradingBot:
                             "ERROR", "sync", f"{sym} sync failed: {result}",
                         )
 
+                # Portfolio snapshot for dashboard (after sync so open_orders is fresh)
+                try:
+                    _holdings_snap = {
+                        sym: {
+                            "qty": mgr._position_qty,
+                            "avg_cost": mgr._avg_cost,
+                            "has_sell_order": any(
+                                o.side == OrderSide.SELL for o in mgr.open_orders
+                            ),
+                            "sell_order_price": next(
+                                (o.price for o in mgr.open_orders if o.side == OrderSide.SELL),
+                                None,
+                            ),
+                        }
+                        for sym, mgr in self.order_managers.items()
+                    }
+                    self.db.set_runtime_config("portfolio_snapshot", {
+                        "free_usdt": free_balance,
+                        "holdings": _holdings_snap,
+                        "updated_at": datetime.now(UTC).isoformat(),
+                    })
+                except Exception as _snap_err:
+                    logger.debug("[portfolio] Failed to persist snapshot: {}", _snap_err)
+
                 # Step 4: Stale inventory exit check
                 stale_results = await asyncio.gather(
                     *(mgr.check_stale_inverse_orders(
@@ -499,7 +523,7 @@ class TradingBot:
                             logger.error("{}: inventory stop-loss check failed: {}", sym, sl_err)
 
                 # Step 4c: Hedge unhedged inventory (gate-free coverage SELLs)
-                await self._hedge_unhedged_inventory(signals=signals)
+                await self._hedge_unhedged_inventory(signals=signals, free_balances=free_balances)
 
                 # ── New grid placement: ONLY when trading is allowed ──────
                 # FIX-A: skip new grids when RISK-BLOCKed; also skip on
@@ -705,7 +729,7 @@ class TradingBot:
         return signals
 
     async def _hedge_unhedged_inventory(
-        self, signals: dict[str, StrategySignal],
+        self, signals: dict[str, StrategySignal], free_balances: dict[str, float] | None = None,
     ) -> None:
         """Place coverage SELLs for inventory with no pending SELL orders.
 
@@ -766,7 +790,27 @@ class TradingBot:
                 )
 
             # Guard 6: check notional minimum
-            notional = manager._position_qty * target_price
+            # FIX-BUG-8: cap sell_qty with real balance to avoid Insufficient Balance error
+            base_coin = symbol.upper().replace(self.quote_coin, "")
+            real_free_balance = (free_balances or {}).get(base_coin, 0.0)
+            
+            sell_qty = manager._position_qty
+            if real_free_balance < sell_qty:
+                logger.warning(
+                    "[HEDGE] {} sell_qty capped to real balance: "
+                    "internal={:.8f} exchange={:.8f} using={:.8f}",
+                    symbol, sell_qty, real_free_balance, real_free_balance
+                )
+                sell_qty = real_free_balance
+
+            if sell_qty < float(rules.min_qty):
+                logger.warning(
+                    "[HEDGE] {} sell_qty {:.8f} below minimum ({:.8f}), skipping",
+                    symbol, sell_qty, float(rules.min_qty)
+                )
+                continue
+
+            notional = sell_qty * target_price
             if notional < 5.0:
                 continue
 
@@ -778,7 +822,7 @@ class TradingBot:
                 order_id = await self.exchange.place_limit_order(
                     symbol=symbol,
                     side="Sell",
-                    qty=manager._position_qty,
+                    qty=sell_qty,
                     price=target_price,
                     orderLinkId=link_id,
                 )
@@ -788,7 +832,7 @@ class TradingBot:
                     symbol=symbol,
                     side="Sell",
                     price=target_price,
-                    qty=manager._position_qty,
+                    qty=sell_qty,
                 )
                 distance_pct = (target_price - signal.current_price) / signal.current_price
                 logger.info(

@@ -186,38 +186,42 @@ class BybitExchangeClient:
 
     async def get_portfolio_equity(
         self, *, symbols: list[str], quote_coin: str = "USDT",
-    ) -> tuple[float, float]:
-        """Mark-to-market equity: returns (total_equity, free_quote_balance)."""
+    ) -> tuple[float, float, dict[str, float]]:
+        """Mark-to-market equity: returns (total_equity, free_quote_balance, all_free_balances)."""
         client = self._ensure_http()
         response = await self._run_http(
             client.get_wallet_balance, accountType="UNIFIED",
         )
         wallet_list = response.get("result", {}).get("list", [])
         if not wallet_list:
-            return 0.0, 0.0
+            return 0.0, 0.0, {}
 
         coins_data = wallet_list[0].get("coin", [])
-        balances: dict[str, float] = {}
+        balances_total: dict[str, float] = {}
+        balances_free: dict[str, float] = {}
+        
         for item in coins_data:
             coin = item.get("coin", "")
-            bal = float(item.get("walletBalance") or 0.0)
-            if bal > 0:
-                balances[coin] = bal
+            total_bal = float(item.get("walletBalance") or 0.0)
+            # Available balance (not locked in orders)
+            free_bal = float(
+                item.get("availableToWithdraw") or 
+                item.get("availableToBorrow") or 
+                item.get("walletBalance") or 0.0
+            )
+            if total_bal > 0:
+                balances_total[coin] = total_bal
+            if free_bal > 0:
+                balances_free[coin] = free_bal
 
         # Start with quote coin balance
-        total_equity = balances.get(quote_coin, 0.0)
-        free_quote_balance = 0.0
-        for item in coins_data:
-            if item.get("coin", "") == quote_coin:
-                # Bybit provides availableToWithdraw or availableToBorrow or walletBalance
-                val = item.get("availableToWithdraw") or item.get("availableToBorrow") or item.get("walletBalance")
-                free_quote_balance = float(val or 0.0)
-                break
+        total_equity = balances_total.get(quote_coin, 0.0)
+        free_quote_balance = balances_free.get(quote_coin, 0.0)
 
         # Add mark-to-market value of base assets
         for symbol in symbols:
             base_coin = symbol.upper().replace(quote_coin, "")
-            base_balance = balances.get(base_coin, 0.0)
+            base_balance = balances_total.get(base_coin, 0.0)
             if base_balance <= 0:
                 continue
             try:
@@ -247,8 +251,8 @@ class BybitExchangeClient:
                         "{}: Ticker failed {} consecutive times. Potential critical connectivity issue.", 
                         symbol, fail_count
                     )
-
-        return total_equity, free_quote_balance
+                    
+        return total_equity, free_quote_balance, balances_free
 
     async def get_orderbook(
         self, *, symbol: str, limit: int = 5,

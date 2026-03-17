@@ -137,6 +137,38 @@
             <!-- Dynamic mini cards injected via app.js -->
           </div>
 
+          <!-- 2.4 Portfolio Holdings -->
+          <div class="card" id="holdings-card" style="margin-bottom:var(--space-md);">
+            <div class="card-header">
+              <span class="card-title">💼 Portfolio Holdings</span>
+              <span style="font-size:0.75rem;color:var(--text-muted);" id="holdings-updated-at"></span>
+            </div>
+            <div style="overflow-x:auto;">
+              <table id="holdings-table" style="width:100%;border-collapse:collapse;font-size:0.82rem;">
+                <thead>
+                  <tr style="color:var(--text-muted);border-bottom:1px solid rgba(255,255,255,0.07);">
+                    <th style="text-align:left;padding:6px 8px;">Coin</th>
+                    <th style="text-align:right;padding:6px 8px;">Cantidad</th>
+                    <th style="text-align:right;padding:6px 8px;">Coste Medio</th>
+                    <th style="text-align:right;padding:6px 8px;">Precio Actual</th>
+                    <th style="text-align:right;padding:6px 8px;">Valor USDT</th>
+                    <th style="text-align:right;padding:6px 8px;">PnL $</th>
+                    <th style="text-align:right;padding:6px 8px;">PnL %</th>
+                    <th style="text-align:right;padding:6px 8px;">Sell Order</th>
+                  </tr>
+                </thead>
+                <tbody id="holdings-tbody">
+                  <tr><td colspan="8" style="text-align:center;color:var(--text-muted);padding:20px;">Cargando...</td></tr>
+                </tbody>
+              </table>
+            </div>
+            <div id="holdings-footer" style="display:flex;gap:24px;justify-content:flex-end;padding:10px 8px 2px;font-size:0.82rem;border-top:1px solid rgba(255,255,255,0.07);margin-top:8px;flex-wrap:wrap;">
+              <span>USDT Libre: <b id="free-usdt" style="color:var(--text-primary);">—</b></span>
+              <span>Total Equity: <b id="total-equity" style="color:var(--text-primary);">—</b></span>
+              <span>PnL Total: <b id="total-pnl">—</b></span>
+            </div>
+          </div>
+
           <div class="two-col">
             <div class="chart-container">
               <div class="card-header">

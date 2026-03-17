@@ -9,7 +9,15 @@
       "Bash(python -m pytest tests/unit/test_lifecycle_fixes.py -v --tb=short)",
       "Bash(python -c \"from core.exchange import BybitExchangeClient; e = BybitExchangeClient\\(api_key='''', api_secret='''', testnet=True, symbol=''BTCUSDC''\\); print\\(hasattr\\(e, ''place_market_order''\\)\\)\")",
       "Bash(python -m pytest tests/unit/test_improvements.py tests/unit/test_order_manager.py tests/unit/test_risk_manager.py -v --tb=short)",
-      "Bash(python -m pytest tests/unit/test_protocol_conformance.py -v)"
+      "Bash(python -m pytest tests/unit/test_protocol_conformance.py -v)",
+      "Bash(python -c \"from data.models import OrderSide; print\\(repr\\(OrderSide.SELL\\)\\)\")",
+      "Bash(python -m pytest tests/ -q --tb=no)",
+      "Bash(python -m pytest tests/ -x -q)",
+      "Bash(python -m pytest tests/unit/ -v --tb=short)",
+      "Bash(python -m pytest tests/unit/ --collect-only -q)",
+      "Bash(python -m pytest tests/ --co -q)",
+      "Bash(python -m pytest tests/unit/test_portfolio_holdings.py --co -q)",
+      "Bash(python -m pytest tests/unit/test_fix_8_hedge_balance.py --co -q)"
     ]
   }
 }
