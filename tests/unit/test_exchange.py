@@ -108,6 +108,68 @@ async def test_get_portfolio_equity_skips_on_first_failure(exchange, mock_http):
         assert total == 1000.0
 
 @pytest.mark.asyncio
+async def test_free_balances_falls_through_string_zero(exchange, mock_http):
+    """BUG-8b regression: availableToWithdraw='0' (truthy string) must not block
+    walletBalance from being used as the free-balance fallback.
+
+    Before the fix the `or` chain stopped at '0' (truthy) → float('0') = 0.0,
+    so the coin was never added to free_balances. The hedge was silently skipped.
+    """
+    mock_http.get_wallet_balance.return_value = {
+        "result": {
+            "list": [{
+                "coin": [
+                    {"coin": "USDC", "walletBalance": "100.0", "availableToWithdraw": "100.0"},
+                    {
+                        "coin": "SOL",
+                        "walletBalance": "0.5573",
+                        "availableToWithdraw": "0",   # string "0" — truthy in Python
+                        "availableToBorrow": "0",
+                    },
+                ]
+            }]
+        }
+    }
+
+    with patch.object(exchange, "get_last_price", new_callable=AsyncMock) as mock_price:
+        mock_price.return_value = 95.0
+        total, free, balances = await exchange.get_portfolio_equity(
+            symbols=["SOLUSDC"], quote_coin="USDC"
+        )
+
+    assert "SOL" in balances, "SOL must appear in free_balances when walletBalance > 0"
+    assert balances["SOL"] == pytest.approx(0.5573)
+
+
+@pytest.mark.asyncio
+async def test_free_balances_uses_available_to_withdraw_when_nonzero(exchange, mock_http):
+    """Normal case: availableToWithdraw='0.5573' is truthy and used directly."""
+    mock_http.get_wallet_balance.return_value = {
+        "result": {
+            "list": [{
+                "coin": [
+                    {"coin": "USDC", "walletBalance": "100.0", "availableToWithdraw": "100.0"},
+                    {
+                        "coin": "SOL",
+                        "walletBalance": "0.5573",
+                        "availableToWithdraw": "0.5573",
+                    },
+                ]
+            }]
+        }
+    }
+
+    with patch.object(exchange, "get_last_price", new_callable=AsyncMock) as mock_price:
+        mock_price.return_value = 95.0
+        total, free, balances = await exchange.get_portfolio_equity(
+            symbols=["SOLUSDC"], quote_coin="USDC"
+        )
+
+    assert "SOL" in balances
+    assert balances["SOL"] == pytest.approx(0.5573)
+
+
+@pytest.mark.asyncio
 async def test_place_limit_order_normalizes_precision(exchange, mock_http):
     """Verify size and price are safely truncated down to symbol step sizes."""
     # Mock spot rules

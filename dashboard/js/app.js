@@ -66,6 +66,8 @@ function logout() {
     sessionStorage.removeItem('bot_pass');
     document.getElementById('login-modal').style.display = 'flex';
     if (APP.refreshInterval) clearInterval(APP.refreshInterval);
+    if (APP.holdingsInterval) clearInterval(APP.holdingsInterval);
+    APP.holdingsInterval = null;
     if (APP.ws) APP.ws.close();
 }
 

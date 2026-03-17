@@ -203,11 +203,14 @@ class BybitExchangeClient:
         for item in coins_data:
             coin = item.get("coin", "")
             total_bal = float(item.get("walletBalance") or 0.0)
-            # Available balance (not locked in orders)
-            free_bal = float(
-                item.get("availableToWithdraw") or 
-                item.get("availableToBorrow") or 
-                item.get("walletBalance") or 0.0
+            # Available balance (not locked in orders).
+            # FIX-BUG-8b: convert each field to float BEFORE the `or` chain so that
+            # the string "0" (truthy in Python) doesn't short-circuit to 0.0 and
+            # block the fallthrough to walletBalance.
+            free_bal = (
+                float(item.get("availableToWithdraw") or 0.0)
+                or float(item.get("availableToBorrow") or 0.0)
+                or float(item.get("walletBalance") or 0.0)
             )
             if total_bal > 0:
                 balances_total[coin] = total_bal
