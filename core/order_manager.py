@@ -267,7 +267,10 @@ class OrderManager:
         """
         if self._position_qty <= 1e-6:
             return False
-            
+        # Ignore dust positions worth less than $1 (residual from partial fills or fees)
+        if self._avg_cost > 0 and self._position_qty * self._avg_cost < 1.0:
+            return False
+
         pending_sell_qty = sum(
             o.qty for o in self.open_orders 
             if o.side == OrderSide.SELL

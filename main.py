@@ -923,14 +923,6 @@ class TradingBot:
             # RANGING: allow LONG and NEUTRAL (grid works in sideways markets)
             # TRANSITIONAL: require LONG or NEUTRAL (block SHORT only)
             # TRENDING_UP: any bias allowed (already passed regime gate above)
-            _bias = str(signal.trend_bias).lower()
-            if signal.regime == MarketRegime.TRANSITIONAL and _bias not in ("long", "neutral"):
-                logger.info(
-                    "SKIP {}: regime=TRANSITIONAL trend_bias={} (only LONG/NEUTRAL allowed)",
-                    symbol, signal.trend_bias,
-                )
-                continue
-
             # Step 6: Volume ratio filter
             if self.settings.grid.volume_filter_enabled:
                 if signal.volume_ratio < self.settings.grid.min_volume_ratio_filter:
@@ -944,13 +936,15 @@ class TradingBot:
             if signal.close_history is not None and active_symbols:
                 is_correlated = False
                 for active_sym in active_symbols:
+                    if active_sym == symbol:
+                        continue  # skip self-correlation
                     active_sig = signals.get(active_sym)
                     if active_sig and active_sig.close_history is not None:
                         if len(signal.close_history) != len(active_sig.close_history):
                             continue
                         _corr_raw = np.corrcoef(signal.close_history, active_sig.close_history)[0, 1]
                         corr = float(_corr_raw) if not np.isnan(_corr_raw) else 0.0
-                        if corr > 0.8:
+                        if corr > 0.92:
                             is_correlated = True
                             await self._log_and_notify(
                                 "INFO", "strategy",
@@ -1012,7 +1006,7 @@ class TradingBot:
             current_notional = float(normalized_qty) * live_price
             
             if normalized_qty < rules.min_qty or current_notional < 5.0:
-                self._placement_cooldown_until[symbol] = now + timedelta(seconds=1800)
+                self._placement_cooldown_until[symbol] = now + timedelta(seconds=300)
                 await self._log_event(
                     "WARNING", "strategy",
                     f"{symbol} skipped due to min_qty or notional constraint",
@@ -1293,7 +1287,7 @@ class TradingBot:
         self, symbol: str, manager: OrderManager, current_price: float,
     ) -> bool:
         """Block new BUY grids if inventory exceeds max ratio of allocated capital."""
-        allocated_capital = self.settings.grid.capital_usdt / max(1, len(self.symbols))
+        allocated_capital = self.settings.grid.capital_usdt / max(1, self.settings.grid.max_active_pairs)
         if allocated_capital <= 0:
             return True
         position_value = manager._position_qty * current_price
@@ -1393,9 +1387,9 @@ class TradingBot:
             adx_value = 0.0
             trend_bias = "neutral"
 
-        # Compute inventory ratio
+        # Compute inventory ratio using active pairs as denominator (not total symbols)
         inventory_value = manager._position_qty * current_price
-        allocated_capital = self.settings.grid.capital_usdt / max(1, len(self.symbols))
+        allocated_capital = self.settings.grid.capital_usdt / max(1, self.settings.grid.max_active_pairs)
         inventory_ratio = inventory_value / allocated_capital if allocated_capital > 0 else 0.0
 
         # Compute time since last refresh
@@ -1411,6 +1405,7 @@ class TradingBot:
         else:
             price_move_pct = 1.0  # First refresh: always passes min-move
 
+        has_pending_sell = any(o.side == OrderSide.SELL for o in manager.open_orders)
         all_passed, gate_results = evaluate_safety_gates(
             adx_value=adx_value,
             trend_bias=trend_bias,
@@ -1423,6 +1418,7 @@ class TradingBot:
             cooldown_seconds=self.settings.grid.refresh_cooldown_seconds,
             min_move_pct=self.settings.grid.refresh_min_move_pct,
             skip_if_orders_above=self.settings.grid.refresh_skip_if_orders_above,
+            has_pending_sell=has_pending_sell,
         )
 
         # Log every gate decision
@@ -1505,6 +1501,12 @@ class TradingBot:
             self.db.set_runtime_config("risk_status", self.risk_manager.get_risk_status())
         except Exception as _rs_err:
             logger.debug("[risk] Failed to persist risk status: {}", _rs_err)
+
+        try:
+            if self.risk_manager.peak_equity is not None:
+                self.db.set_runtime_config("peak_equity", self.risk_manager.peak_equity)
+        except Exception as _pe_err:
+            logger.debug("[risk] Failed to persist peak_equity: {}", _pe_err)
 
         try:
             positions = {
@@ -1894,6 +1896,13 @@ async def run_bot() -> None:
         order_managers[symbol] = OrderManager(exchange=exchange, symbol=symbol)
 
     risk_manager = RiskManager(**settings.risk_dict())
+    try:
+        stored_peak = db.get_runtime_config("peak_equity")
+        if stored_peak is not None and isinstance(stored_peak, (int, float)) and stored_peak > 0:
+            risk_manager.peak_equity = float(stored_peak)
+            logger.info("Restored peak_equity={:.4f} from DB", risk_manager.peak_equity)
+    except Exception:
+        pass
     notifier = TelegramNotifier(
         enabled=settings.telegram.enabled,
         token=settings.telegram.bot_token,

@@ -139,7 +139,7 @@ def should_refresh(
     if now is None:
         now = datetime.now(timezone.utc)
 
-    today_str = now.strftime('%Y-%m-%d')
+    today_str = now.date().isoformat()
     if state.refresh_count_date != today_str:
         state.refresh_count_today = 0
         state.refresh_count_date = today_str
@@ -182,6 +182,7 @@ def evaluate_safety_gates(
     cooldown_seconds: int = 1800,
     min_move_pct: float = 0.02,
     skip_if_orders_above: int = 2,
+    has_pending_sell: bool = False,
 ) -> tuple[bool, list[RefreshGateResult]]:
     """
     Evaluate Phase H safety gates for grid refresh.
@@ -238,13 +239,17 @@ def evaluate_safety_gates(
     ))
 
     # G2 — Inventory Cap
-    g2_passed = inventory_ratio <= max_inventory_ratio
+    # Bypass if inventory already has a pending sell order (hedged): refreshing
+    # helps reposition the sell at a better price, not add more exposure.
+    g2_passed = has_pending_sell or inventory_ratio <= max_inventory_ratio
     results.append(RefreshGateResult(
         gate_name="G2_INVENTORY",
         passed=g2_passed,
         reason=(
             f"ratio={inventory_ratio:.2%} <= cap={max_inventory_ratio:.2%}"
-            if g2_passed
+            if inventory_ratio <= max_inventory_ratio
+            else f"ratio={inventory_ratio:.2%} > cap={max_inventory_ratio:.2%} — bypassed (pending sell hedges inventory)"
+            if has_pending_sell
             else f"BLOCKED: ratio={inventory_ratio:.2%} > cap={max_inventory_ratio:.2%} (capital trapped as inventory)"
         ),
         value=inventory_ratio,
