@@ -277,6 +277,33 @@ class TradingBot:
                 f"recover_from_crash detected {recovered_total} orphan open orders.",
             )
 
+        # B.1: Untracked inventory audit — warn when exchange holds base coins
+        # the bot still cannot price (avg_cost reconstruction failed). These
+        # positions silently skip the hedge path and inflate equity-vs-free gap.
+        try:
+            untracked: list[str] = []
+            for symbol, manager in self.order_managers.items():
+                if not manager._position_untracked:
+                    continue
+                base_coin = symbol.replace(self.quote_coin, "")
+                base_balance = await self.exchange.get_balance(coin=base_coin)
+                if base_balance <= 1e-6:
+                    continue
+                # Use latest signal price from DB if available, else skip valuation
+                est_value = base_balance * (manager._avg_cost or 0.0)
+                untracked.append(
+                    f"{symbol}: {base_balance:.8f} {base_coin} (~${est_value:.2f}, no avg_cost)"
+                )
+            if untracked:
+                await self._log_and_notify(
+                    "WARNING", "bot",
+                    "Untracked inventory detected on exchange — bot will not hedge: "
+                    + " | ".join(untracked)
+                    + ". Run scripts/audit_balances.py for full report.",
+                )
+        except Exception as exc:
+            logger.warning("Untracked inventory audit failed: {}", exc)
+
         # SG7: Crash recovery for daily loss circuit breaker
         today = datetime.now(UTC).date()
         day_start_equity = self.db.get_day_start_equity(today)
@@ -497,6 +524,27 @@ class TradingBot:
                 for sym, result in zip(self.order_managers.keys(), stale_results):
                     if isinstance(result, Exception):
                         logger.error("{}: stale inventory check failed: {}", sym, result)
+
+                # B.3: Trailing TP — ratchet inverse SELLs upward as price runs in our favour
+                if self.settings.grid.enable_tp_trailing:
+                    for sym, mgr in self.order_managers.items():
+                        sig = signals.get(sym)
+                        if sig is None or sig.atr_pct <= 0:
+                            continue
+                        try:
+                            ratcheted = await mgr.update_inverse_tp_trailing(
+                                current_price=sig.current_price,
+                                atr_pct=sig.atr_pct,
+                                activation_atr_multiple=self.settings.grid.tp_trailing_activation_atr_multiple,
+                                trail_atr_multiple=self.settings.grid.tp_trailing_distance_atr_multiple,
+                            )
+                            if ratcheted:
+                                logger.info(
+                                    "[TP-TRAIL] {}: ratcheted {} inverse SELL(s) at price {:.4f}",
+                                    sym, ratcheted, sig.current_price,
+                                )
+                        except Exception as tt_err:
+                            logger.error("{}: TP trailing failed: {}", sym, tt_err)
 
                 # Step 4b: Inventory soft stop-loss (MEJORA-011)
                 if self.settings.grid.enable_inventory_stop_loss:
@@ -1311,7 +1359,16 @@ class TradingBot:
 
     @staticmethod
     def _score_signal(signal: StrategySignal, all_signals: dict[str, StrategySignal]) -> float:
-        """Rank candidate symbols using z-score relative scoring (S1)."""
+        """Rank candidate symbols by where the grid actually makes money.
+
+        Reward: high ATR (more spread to capture), high volume (faster fills),
+        ranging/transitional regime (mean-reversion friendly).
+
+        Penalize: very high ADX (trend pressure works against grid mean-reversion).
+
+        Direction-agnostic — spot grid earns from volatility + return-to-mean,
+        not from picking trend direction.
+        """
         import math
         active = [s for s in all_signals.values() if not s.pause_new_grid]
         if not active:
@@ -1328,8 +1385,15 @@ class TradingBot:
         z_atr = (signal.atr_pct - atr_mean) / atr_std
         z_adx = (signal.adx_value - adx_mean) / adx_std
 
-        trend_bonus = 2.0 if str(signal.trend_bias).lower() == "long" else 0.0
-        return z_atr - z_adx + trend_bonus
+        vol_bonus = 1.5 if signal.volume_ratio > 1.5 else 0.0
+        regime_bonus = {
+            "ranging": 1.5,
+            "transitional": 0.5,
+            "trending_up": 1.0,
+            "trending_down": 0.0,
+        }.get(str(signal.regime).lower(), 0.0)
+
+        return z_atr - 0.5 * z_adx + vol_bonus + regime_bonus
 
     async def _persist_grid_states(self, signals: dict[str, StrategySignal]) -> None:
         def _sync_persist():

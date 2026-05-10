@@ -237,6 +237,48 @@ class GridSettings(BaseSettings):
         description="Percentage above cost basis for inventory exit (0.5% = 0.005)",
     )
 
+    # ── B.3 Trailing TP on inverse SELLs ────────────────────────────
+    enable_tp_trailing: bool = Field(
+        default=False,
+        description="Ratchet inverse SELL orders upward when price runs >2×ATR above avg_cost",
+    )
+    tp_trailing_activation_atr_multiple: float = Field(
+        default=2.0, ge=0.5, le=10.0,
+        description="Activate trailing only when price > avg_cost × (1 + atr × this)",
+    )
+    tp_trailing_distance_atr_multiple: float = Field(
+        default=1.0, ge=0.2, le=5.0,
+        description="Trailing SELL stays this many ATRs below current price",
+    )
+
+    # ── C.2 DCA: progressive qty per BUY level ──────────────────────
+    # Each BUY level idx N is qty = base_qty × (1 + dca_qty_increment × (N-1))
+    # Default 0.0 = flat sizing (current behaviour). 0.3 = each deeper level
+    # is 30% bigger than the previous, a soft martingale that lowers avg_cost
+    # faster on adverse moves while keeping total exposure bounded.
+    dca_qty_increment: float = Field(
+        default=0.0, ge=0.0, le=1.0,
+        description="Per-level qty increment for BUY levels (0=flat, 0.3=+30% per deeper level)",
+    )
+
+    # ── C.3 Trend-rider mode (BUY-ladder when TRENDING_UP + ADX>threshold)
+    enable_trend_rider: bool = Field(
+        default=False,
+        description="When regime=TRENDING_UP and ADX>trend_rider_adx_threshold, replace symmetric grid with tight BUY-ladder",
+    )
+    trend_rider_adx_threshold: float = Field(
+        default=50.0, ge=30.0, le=80.0,
+        description="ADX threshold above which the trend-rider mode activates",
+    )
+    trend_rider_buy_spacing_pct: float = Field(
+        default=0.004, ge=0.001, le=0.03,
+        description="Tight BUY spacing between ladder rungs",
+    )
+    trend_rider_levels: int = Field(
+        default=3, ge=2, le=8,
+        description="Number of BUY rungs in trend-rider ladder",
+    )
+
     # ── Inventory Soft Stop-Loss ────────────────────────────────────
     enable_inventory_stop_loss: bool = Field(
         default=False,
@@ -669,6 +711,20 @@ class Settings(BaseSettings):
             "adx_threshold": self.indicators.adx_threshold,
             "ema_fast": self.indicators.ema_fast,
             "ema_slow": self.indicators.ema_slow,
+            # Phase G: asymmetric grid (was missing — settings flags never reached the strategy)
+            "enable_asymmetric_grid": self.grid.enable_asymmetric_grid,
+            "asymmetric_bearish_buy_factor": self.grid.asymmetric_bearish_buy_factor,
+            "asymmetric_bearish_sell_factor": self.grid.asymmetric_bearish_sell_factor,
+            "asymmetric_bullish_buy_factor": self.grid.asymmetric_bullish_buy_factor,
+            "asymmetric_bullish_sell_factor": self.grid.asymmetric_bullish_sell_factor,
+            "asymmetric_min_profit_multiple": self.grid.asymmetric_min_profit_multiple,
+            # C.2 DCA
+            "dca_qty_increment": self.grid.dca_qty_increment,
+            # C.3 Trend-rider
+            "enable_trend_rider": self.grid.enable_trend_rider,
+            "trend_rider_adx_threshold": self.grid.trend_rider_adx_threshold,
+            "trend_rider_buy_spacing_pct": self.grid.trend_rider_buy_spacing_pct,
+            "trend_rider_levels": self.grid.trend_rider_levels,
         }
 
     def risk_dict(self) -> dict:

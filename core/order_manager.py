@@ -748,6 +748,121 @@ class OrderManager:
 
         return executed_any
 
+    async def update_inverse_tp_trailing(
+        self,
+        *,
+        current_price: float,
+        atr_pct: float,
+        activation_atr_multiple: float = 2.0,
+        trail_atr_multiple: float = 1.0,
+        min_improvement_pct: float = 0.003,
+    ) -> int:
+        """Ratchet inverse SELL orders upward as price runs in our favor.
+
+        When current_price > avg_cost × (1 + atr_pct × activation_atr_multiple),
+        re-price each inverse SELL to (current_price × (1 - atr_pct × trail_atr_multiple)).
+        Only ratchets up — once raised, never lowered. Skips if the new price would
+        not improve the existing one by at least min_improvement_pct (avoids API spam).
+
+        Returns the number of orders successfully re-priced.
+        """
+        if self._position_untracked or self._avg_cost <= 0 or atr_pct <= 0:
+            return 0
+
+        activation_threshold = self._avg_cost * (1 + atr_pct * activation_atr_multiple)
+        if current_price < activation_threshold:
+            return 0
+
+        trail_distance_pct = atr_pct * trail_atr_multiple
+        target_price = current_price * (1 - trail_distance_pct)
+
+        candidates = [
+            o for o in list(self._orders.values())
+            if o.status == OrderStatus.PENDING
+            and o.side == OrderSide.SELL
+            and (
+                o.level_id.startswith("inverse-")
+                or o.level_id.startswith("inv-")
+                or o.level_id.startswith("hedge-")
+                or o.level_id.startswith("trail-")
+            )
+        ]
+        if not candidates:
+            return 0
+
+        ratcheted = 0
+        for order in candidates:
+            if target_price <= order.price * (1 + min_improvement_pct):
+                continue
+            # Sanity: keep the trailed sell strictly above the cost basis after fees.
+            min_safe_price = self._avg_cost * (1 + 4 * self.maker_fee_pct)
+            if target_price < min_safe_price:
+                continue
+
+            async with self._lock:
+                try:
+                    await self.exchange.cancel_order(symbol=self.symbol, order_id=order.order_id)
+                    order.status = OrderStatus.CANCELED
+                    order.updated_at = datetime.now(UTC)
+                except Exception as exc:
+                    exc_str = str(exc).lower()
+                    if "filled" in exc_str or "not found" in exc_str or "not exist" in exc_str:
+                        order.status = OrderStatus.FILLED
+                        order.updated_at = datetime.now(UTC)
+                        self._confirmed_fill_ids.add(order.order_id)
+                        logger.info(
+                            "{}: trailing-cancel race — order {} filled/gone, skipping replacement",
+                            self.symbol, order.order_id,
+                        )
+                        continue
+                    logger.error(
+                        "{}: trailing TP cancel failed for {}: {}",
+                        self.symbol, order.order_id, exc,
+                    )
+                    continue
+
+                timestamp_ms = str(int(datetime.now(UTC).timestamp() * 1000))
+                root_id = self._root_level_id(order.level_id)
+                short_root = root_id[-18:] if len(root_id) > 18 else root_id
+                trail_link_id = f"trail-{short_root}-{timestamp_ms}"
+                try:
+                    new_order_id = await self.exchange.place_limit_order(
+                        symbol=self.symbol,
+                        side=str(OrderSide.SELL),
+                        qty=order.qty,
+                        price=target_price,
+                        orderLinkId=trail_link_id,
+                    )
+                    self._orders[new_order_id] = ManagedOrder(
+                        order_id=new_order_id,
+                        level_id=trail_link_id,
+                        symbol=self.symbol,
+                        side=str(OrderSide.SELL),
+                        price=target_price,
+                        qty=order.qty,
+                    )
+                    ratcheted += 1
+                    logger.info(
+                        "{}: TP trailing — sell {:.6f} from {:.4f} → {:.4f} "
+                        "(current {:.4f}, avg_cost {:.4f}, ATR%={:.3f})",
+                        self.symbol, order.qty, order.price, target_price,
+                        current_price, self._avg_cost, atr_pct,
+                    )
+                except Exception as exc:
+                    logger.error(
+                        "{}: trailing TP replacement failed for {}: {}. "
+                        "Queuing inverse retry to avoid losing inventory hedge.",
+                        self.symbol, order.order_id, exc,
+                    )
+                    self._pending_inverse_retries.append({
+                        "side": str(OrderSide.SELL),
+                        "qty": order.qty,
+                        "price": target_price,
+                        "level_id": trail_link_id,
+                    })
+
+        return ratcheted
+
     async def check_inventory_stop_loss(
         self, current_price: float, stop_pct: float
     ) -> bool:

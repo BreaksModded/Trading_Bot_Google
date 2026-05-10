@@ -36,6 +36,14 @@ class StrategyConfig:
     asymmetric_bullish_buy_factor: float = 0.80
     asymmetric_bullish_sell_factor: float = 1.25
     asymmetric_min_profit_multiple: float = 1.15
+    # C.2 DCA: each deeper BUY level has qty × (1 + dca_qty_increment × (idx-1))
+    dca_qty_increment: float = 0.0
+    # C.3 Trend-rider: when regime=TRENDING_UP and ADX>threshold, replace
+    # symmetric grid with a tight BUY-only ladder
+    enable_trend_rider: bool = False
+    trend_rider_adx_threshold: float = 50.0
+    trend_rider_buy_spacing_pct: float = 0.004
+    trend_rider_levels: int = 3
 
 
 @dataclass(slots=True)
@@ -202,13 +210,20 @@ class GridStrategy:
     def _build_levels(
         self, current_price: float, buy_spacing_pct: float, sell_spacing_pct: float, trend: TrendBias, target_size: float
     ) -> list[GridLevel]:
-        """Create limit orders around spot depending on trend filter."""
+        """Create limit orders around spot depending on trend filter.
+
+        C.2: BUY level qty scales by (1 + dca_qty_increment × (idx-1)) so deeper
+        levels carry more weight, accelerating avg_cost reduction on adverse moves.
+        SELL levels keep flat qty.
+        """
         levels: list[GridLevel] = []
-        qty = target_size / current_price
+        base_qty = target_size / current_price
+        dca_inc = max(0.0, self.config.dca_qty_increment)
 
         for idx in range(1, self.config.num_levels + 1):
             lower_price = current_price * (1 - buy_spacing_pct * idx)
             upper_price = current_price * (1 + sell_spacing_pct * idx)
+            buy_qty = base_qty * (1.0 + dca_inc * (idx - 1))
 
             if trend != TrendBias.SHORT:
                 levels.append(
@@ -216,7 +231,7 @@ class GridStrategy:
                         level_id=f"buy-{idx}-{int(lower_price)}",
                         price=lower_price,
                         side=OrderSide.BUY,
-                        qty=qty,
+                        qty=buy_qty,
                     )
                 )
 
@@ -226,10 +241,38 @@ class GridStrategy:
                         level_id=f"sell-{idx}-{int(upper_price)}",
                         price=upper_price,
                         side=OrderSide.SELL,
-                        qty=qty,
+                        qty=base_qty,
                     )
                 )
 
+        return levels
+
+    def _build_trend_rider_levels(
+        self, current_price: float, target_size: float
+    ) -> list[GridLevel]:
+        """C.3: BUY-only tight ladder for strong-uptrend regimes.
+
+        Places N rungs below the current price at trend_rider_buy_spacing_pct
+        intervals. SELLs are not placed at grid time — the inverse-SELL flow
+        in handle_fill() places exits after each BUY fill, and trailing TP
+        (when enabled) ratchets them upward as the trend continues.
+        """
+        levels: list[GridLevel] = []
+        base_qty = target_size / current_price
+        rungs = max(2, int(self.config.trend_rider_levels))
+        spacing = max(0.001, float(self.config.trend_rider_buy_spacing_pct))
+        dca_inc = max(0.0, self.config.dca_qty_increment)
+        for idx in range(1, rungs + 1):
+            price = current_price * (1 - spacing * idx)
+            qty = base_qty * (1.0 + dca_inc * (idx - 1))
+            levels.append(
+                GridLevel(
+                    level_id=f"trider-{idx}-{int(price)}",
+                    price=price,
+                    side=OrderSide.BUY,
+                    qty=qty,
+                )
+            )
         return levels
 
     def compute_signal(self, market_df: pd.DataFrame, *, grid_settings=None) -> StrategySignal:
@@ -256,7 +299,14 @@ class GridStrategy:
         base_spacing = self.compute_spacing_pct(atr_pct)
         buy_spacing, sell_spacing = self.compute_asymmetric_spacing(base_spacing, trend, adx_value)
 
-        pause_grid = self.config.enable_adx_filter and adx_value > self.config.adx_threshold
+        # ADX filter is directional: only block when high ADX coincides with a SHORT
+        # trend (falling-knife risk). High ADX with LONG/NEUTRAL bias means strong
+        # upside momentum — exactly what the asymmetric grid is designed to capture.
+        pause_grid = (
+            self.config.enable_adx_filter
+            and adx_value > self.config.adx_threshold
+            and trend == TrendBias.SHORT
+        )
         reason = "grid_active"
 
         # Step 5: Regime classification (ADX + RSI)
@@ -290,16 +340,34 @@ class GridStrategy:
         target_size = (base_size * self.config.sizing_baseline_atr) / atr_pct if atr_pct > 0 else base_size
         target_size = min(target_size, self.config.max_order_size_usdt)
 
-        # Override num_levels temporarily for level building; use try/finally so
-        # the original value is always restored even if _build_levels raises.
-        original_levels = self.config.num_levels
-        self.config.num_levels = effective_levels
-        try:
-            levels = self._build_levels(
-                current_price=current_price, buy_spacing_pct=buy_spacing, sell_spacing_pct=sell_spacing, trend=trend, target_size=target_size
+        # C.3: Trend-rider mode short-circuits the symmetric grid when the regime
+        # is decisively bullish. We build a tight BUY-only ladder and let the
+        # inverse-SELL + trailing TP flow handle exits.
+        trend_rider_active = (
+            self.config.enable_trend_rider
+            and regime == MarketRegime.TRENDING_UP
+            and adx_value > self.config.trend_rider_adx_threshold
+        )
+
+        if trend_rider_active:
+            from loguru import logger
+            logger.info(
+                "[TrendRider] {} | regime={} ADX={:.1f} > {} | building {} BUY ladder at {:.2%} spacing",
+                self.config.symbol, regime.value, adx_value, self.config.trend_rider_adx_threshold,
+                self.config.trend_rider_levels, self.config.trend_rider_buy_spacing_pct,
             )
-        finally:
-            self.config.num_levels = original_levels
+            levels = self._build_trend_rider_levels(current_price=current_price, target_size=target_size)
+        else:
+            # Override num_levels temporarily for level building; use try/finally so
+            # the original value is always restored even if _build_levels raises.
+            original_levels = self.config.num_levels
+            self.config.num_levels = effective_levels
+            try:
+                levels = self._build_levels(
+                    current_price=current_price, buy_spacing_pct=buy_spacing, sell_spacing_pct=sell_spacing, trend=trend, target_size=target_size
+                )
+            finally:
+                self.config.num_levels = original_levels
 
         if pause_grid:
             reason = f"adx_above_threshold:{adx_value:.2f}"
@@ -326,7 +394,10 @@ class GridStrategy:
         )
 
     def estimate_required_capital(self, signal: StrategySignal) -> float:
-        """Estimate USDT required for BUY side levels in the signal."""
-        buy_levels = [level for level in signal.levels if level.side == OrderSide.BUY]
-        return float(len(buy_levels) * signal.target_notional)
+        """Estimate USDT required for BUY side levels in the signal.
+
+        Sums actual qty × price per BUY level (handles DCA non-uniform sizing
+        and trend-rider ladders where qty/price varies per rung).
+        """
+        return float(sum(lvl.qty * lvl.price for lvl in signal.levels if lvl.side == OrderSide.BUY))
 
