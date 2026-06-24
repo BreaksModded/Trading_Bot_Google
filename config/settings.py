@@ -484,6 +484,74 @@ class RiskSettings(BaseSettings):
     )
 
 
+# ── Futures (Linear Perpetuals) ───────────────────────────────
+class FuturesSettings(BaseSettings):
+    """Linear perpetual (USDT) futures neutral-grid configuration.
+
+    Replaces the legacy spot grid. A NEUTRAL grid places LONG limit orders
+    below the mid price and SHORT limit orders above it, profiting from
+    oscillation in *both* directions. Risk is bounded by a hard stop-loss and
+    conservative leverage so the liquidation price sits far outside the grid
+    range. Single-symbol by design (the spot multi-pair sprawl is removed).
+    """
+
+    model_config = SettingsConfigDict(env_prefix="FUTURES_")
+
+    enabled: bool = Field(default=True, description="Run the futures bot (vs legacy spot)")
+    symbol: str = Field(default="ETHUSDT", description="Linear perpetual symbol (USDT-margined)")
+    category: str = Field(default="linear", description="Bybit product category")
+    leverage: int = Field(default=2, ge=1, le=10, description="Account leverage (conservative 2-3x)")
+    position_mode: str = Field(default="one-way", description="one-way | hedge")
+    margin_mode: str = Field(default="ISOLATED", description="ISOLATED (set on exchange side)")
+    timeframe: str = Field(default="5", description="Kline interval for indicators (minutes)")
+    loop_interval_seconds: int = Field(default=10, ge=3, le=120, description="Main loop cadence")
+
+    # ── Grid geometry ──
+    grid_levels: int = Field(default=8, ge=2, le=30, description="Limit levels per side of mid")
+    use_atr_range: bool = Field(default=True, description="Derive half-range from ATR instead of fixed pct")
+    grid_range_atr_multiple: float = Field(
+        default=2.5, ge=0.5, le=6.0, description="Half-range = ATR%% x this multiple",
+    )
+    grid_range_pct: float = Field(
+        default=0.10, ge=0.02, le=0.50, description="Fixed half-range if use_atr_range=False (10%%)",
+    )
+    min_spacing_pct: float = Field(
+        default=0.004, ge=0.001, le=0.05,
+        description="Minimum profit per grid step (must cover fees + funding buffer)",
+    )
+
+    # ── Sizing ──
+    capital_fraction: float = Field(
+        default=0.80, ge=0.10, le=1.00, description="Fraction of available margin to deploy",
+    )
+    order_size_usdt: float = Field(
+        default=0.0, ge=0.0, description="Fixed notional per level; 0 = auto from capital",
+    )
+    min_order_usdt: float = Field(default=5.0, gt=0, description="Exchange minimum notional floor")
+
+    # ── Risk ──
+    stop_loss_pct: float = Field(
+        default=0.12, ge=0.02, le=0.50,
+        description="Hard stop: close everything if price exits the grid range by this much",
+    )
+    min_liquidation_buffer_pct: float = Field(
+        default=0.15, ge=0.05, le=0.50,
+        description="Require the liquidation price to sit at least this far beyond the grid",
+    )
+    max_adverse_funding_rate: float = Field(
+        default=0.001, ge=0.0, le=0.01,
+        description="Pause new entries if 8h funding is worse than this against the net position",
+    )
+
+    # ── Recenter ──
+    recenter_after_stop: bool = Field(
+        default=True, description="Rebuild a fresh grid after a stop-loss episode",
+    )
+    recenter_cooldown_minutes: int = Field(
+        default=30, ge=0, le=720, description="Cooldown before rebuilding after a stop",
+    )
+
+
 # ── Telegram ──────────────────────────────────────────────────
 class TelegramSettings(BaseSettings):
     """Telegram notification settings."""
@@ -586,6 +654,7 @@ class Settings(BaseSettings):
     grid: GridSettings = Field(default_factory=GridSettings)
     indicators: IndicatorSettings = Field(default_factory=IndicatorSettings)
     risk: RiskSettings = Field(default_factory=RiskSettings)
+    futures: FuturesSettings = Field(default_factory=FuturesSettings)
     telegram: TelegramSettings = Field(default_factory=TelegramSettings)
     dashboard: DashboardSettings = Field(default_factory=DashboardSettings)
     jwt: JWTSettings = Field(default_factory=JWTSettings)

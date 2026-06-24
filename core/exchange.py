@@ -417,9 +417,15 @@ class BybitExchangeClient:
     # ── REST: Orders ──────────────────────────────────────────────────
 
     async def place_limit_order(
-        self, *, symbol: str, side: str, qty: float, price: float, orderLinkId: str | None = None,
+        self, *, symbol: str, side: str, qty: float, price: float,
+        orderLinkId: str | None = None, reduce_only: bool = False,
     ) -> str:
-        """Place a post-only limit order and return exchange order ID."""
+        """Place a post-only limit order and return exchange order ID.
+
+        ``reduce_only=True`` marks the order as a take-profit / position-reducing
+        order (linear perpetuals): it can only shrink an open position, never
+        open or flip one. Used for the grid's reduce-only TP legs.
+        """
         client = self._ensure_http()
         rules = await self.get_spot_symbol_rules(symbol)
         normalized_qty = self._round_down_to_step(Decimal(str(qty)), rules.qty_step)
@@ -440,6 +446,8 @@ class BybitExchangeClient:
             price=self._decimal_to_plain_str(normalized_price),
             timeInForce="PostOnly",
         )
+        if reduce_only:
+            params["reduceOnly"] = True
         if orderLinkId:
             params["orderLinkId"] = orderLinkId
 
@@ -554,6 +562,119 @@ class BybitExchangeClient:
             orderFilter="StopOrder",
         )
 
+    # ── REST: Futures (Linear Perpetuals) ─────────────────────────────
+
+    async def get_symbol_rules(self, symbol: str) -> SpotSymbolRules:
+        """Fetch precision/limit rules (works for linear via ``self.category``)."""
+        return await self.get_spot_symbol_rules(symbol)
+
+    async def set_leverage(self, *, symbol: str, leverage: int) -> None:
+        """Set buy/sell leverage for a linear symbol (idempotent)."""
+        client = self._ensure_http()
+        try:
+            await self._run_http(
+                client.set_leverage,
+                category="linear", symbol=symbol,
+                buyLeverage=str(leverage), sellLeverage=str(leverage),
+            )
+            logger.info("{}: leverage set to {}x", symbol, leverage)
+        except Exception as exc:
+            # 110043 = "leverage not modified" — already at target; benign.
+            if "110043" in str(exc) or "not modified" in str(exc).lower():
+                logger.debug("{}: leverage already {}x", symbol, leverage)
+                return
+            raise
+
+    async def get_position(self, *, symbol: str) -> dict[str, Any]:
+        """Return the authoritative one-way position snapshot for ``symbol``.
+
+        Keys: side ('long'|'short'|'flat'), size, entry_price, mark_price,
+        liq_price, leverage, unrealized_pnl, position_value, margin.
+        """
+        client = self._ensure_http()
+        response = await self._run_http(
+            client.get_positions, category="linear", symbol=symbol,
+        )
+        rows = response.get("result", {}).get("list", [])
+        flat = {
+            "symbol": symbol, "side": "flat", "size": 0.0, "entry_price": 0.0,
+            "mark_price": 0.0, "liq_price": 0.0, "leverage": 0.0,
+            "unrealized_pnl": 0.0, "position_value": 0.0, "margin": 0.0,
+        }
+        if not rows:
+            return flat
+
+        p = rows[0]
+
+        def _f(key: str) -> float:
+            v = p.get(key)
+            return float(v) if v not in (None, "") else 0.0
+
+        size = _f("size")
+        raw_side = str(p.get("side") or "")
+        if size <= 0:
+            return flat
+        side = "long" if raw_side == "Buy" else "short" if raw_side == "Sell" else "flat"
+        return {
+            "symbol": symbol,
+            "side": side,
+            "size": size,
+            "entry_price": _f("avgPrice"),
+            "mark_price": _f("markPrice"),
+            "liq_price": _f("liqPrice"),
+            "leverage": _f("leverage"),
+            "unrealized_pnl": _f("unrealisedPnl"),
+            "position_value": _f("positionValue"),
+            "margin": _f("positionIM"),
+        }
+
+    async def get_funding_rate(self, *, symbol: str) -> float:
+        """Current funding rate for the perpetual (per 8h interval, signed)."""
+        client = self._ensure_http()
+        response = await self._run_http(
+            client.get_tickers, category="linear", symbol=symbol,
+        )
+        rows = response.get("result", {}).get("list", [])
+        if not rows:
+            return 0.0
+        return float(rows[0].get("fundingRate") or 0.0)
+
+    async def set_position_stop_loss(self, *, symbol: str, stop_price: float) -> None:
+        """Attach an exchange-side hard stop-loss to the open position."""
+        client = self._ensure_http()
+        rules = await self.get_symbol_rules(symbol)
+        sp = self._round_down_to_step(Decimal(str(stop_price)), rules.tick_size)
+        await self._run_http(
+            client.set_trading_stop,
+            category="linear", symbol=symbol,
+            stopLoss=self._decimal_to_plain_str(sp), positionIdx=0,
+        )
+
+    async def close_position_market(self, *, symbol: str, side: str, qty: float) -> str:
+        """Flatten (part of) a position with a reduce-only market order.
+
+        ``side`` must be the *opposite* of the open position
+        (Sell to close a long, Buy to close a short).
+        """
+        client = self._ensure_http()
+        rules = await self.get_symbol_rules(symbol)
+        q = self._round_down_to_step(Decimal(str(qty)), rules.qty_step)
+        if q < rules.min_qty:
+            raise ExchangeError(
+                f"Close qty below minimum after normalization: {q} < {rules.min_qty} for {symbol}"
+            )
+        response = await self._run_http(
+            client.place_order,
+            category="linear", symbol=symbol, side=side,
+            orderType="Market", qty=self._decimal_to_plain_str(q), reduceOnly=True,
+        )
+        if response.get("retCode") != 0:
+            logger.error(
+                "{}: reduce-only market close rejected — retCode={} retMsg={}",
+                symbol, response.get("retCode"), response.get("retMsg"),
+            )
+        return str(response.get("result", {}).get("orderId", ""))
+
     # ── WebSocket Management ──────────────────────────────────────────
 
     def set_failure_callback(self, callback: FailureCallback) -> None:
@@ -667,6 +788,11 @@ class BybitExchangeClient:
                 )
                 self._private_ws.order_stream(callback=self._dispatch_private)
                 self._private_ws.wallet_stream(callback=self._dispatch_private)
+                # Linear perpetuals: track position/liquidation in real time.
+                try:
+                    self._private_ws.position_stream(callback=self._dispatch_private)
+                except Exception as pos_exc:
+                    logger.debug("position_stream unavailable (non-linear?): {}", pos_exc)
                 retries = 0
                 while not self._stop_ws.is_set():
                     await asyncio.sleep(1)
