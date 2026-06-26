@@ -118,6 +118,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     from api.routes.portfolio import router as portfolio_router
     app.include_router(portfolio_router, prefix="/api")
 
+    from api.routes.futures import router as futures_router
+    app.include_router(futures_router, prefix="/api")
+
     from api.websocket import router as ws_router
     app.include_router(ws_router)
 

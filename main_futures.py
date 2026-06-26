@@ -171,7 +171,7 @@ class FuturesBot:
         else:
             await self._handle_transitional(position)
 
-        self._persist_state(equity, free, regime)
+        self._persist_state(equity, free, regime, ind, position)
         await self._heartbeat()
         await self.health.ping_if_due()
 
@@ -349,15 +349,32 @@ class FuturesBot:
         except Exception as exc:
             logger.debug("persist risk failed: {}", exc)
 
-    def _persist_state(self, equity: float, free: float, regime: MarketRegime) -> None:
+    def _persist_state(self, equity, free, regime, ind=None, position=None) -> None:
         try:
             self.db.record_equity(capital=equity, drawdown_pct=self.risk._last_drawdown)
-            self.db.set_runtime_config("futures_state", {
+            blob = {
                 "mode": self.mode, "regime": regime.value, "symbol": self.symbol,
-                "equity": equity, "free": free,
+                "leverage": self.s.leverage, "equity": equity, "free": free,
+                "peak_equity": self.risk.peak_equity,
                 "trend_stop": self.trend_stop.stop_price if self.trend_stop else None,
                 "updated_at": datetime.now(UTC).isoformat(),
-            })
+            }
+            if ind is not None:
+                blob["indicators"] = {
+                    "price": ind["close"], "adx": ind["adx"],
+                    "ema_fast": ind["ema_fast"], "ema_slow": ind["ema_slow"],
+                    "atr_pct": ind["atr_pct"],
+                    "chandelier_long": ind["chandelier_long"],
+                    "chandelier_short": ind["chandelier_short"],
+                }
+            if position is not None:
+                blob["position"] = {
+                    "side": position.side, "size": position.size,
+                    "entry": position.entry_price, "mark": position.mark_price,
+                    "liq": position.liq_price, "uPnL": position.unrealized_pnl,
+                    "leverage": position.leverage, "margin": position.margin,
+                }
+            self.db.set_runtime_config("futures_state", blob)
         except Exception as exc:
             logger.debug("persist state failed: {}", exc)
 
