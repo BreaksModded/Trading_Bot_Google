@@ -503,7 +503,7 @@ class FuturesSettings(BaseSettings):
     leverage: int = Field(default=2, ge=1, le=10, description="Account leverage (conservative 2-3x)")
     position_mode: str = Field(default="one-way", description="one-way | hedge")
     margin_mode: str = Field(default="ISOLATED", description="ISOLATED (set on exchange side)")
-    timeframe: str = Field(default="5", description="Kline interval for indicators (minutes)")
+    timeframe: str = Field(default="60", description="Primary kline interval for signals (minutes); 60=1H")
     loop_interval_seconds: int = Field(default=10, ge=3, le=120, description="Main loop cadence")
 
     # ── Grid geometry ──
@@ -549,6 +549,45 @@ class FuturesSettings(BaseSettings):
     )
     recenter_cooldown_minutes: int = Field(
         default=30, ge=0, le=720, description="Cooldown before rebuilding after a stop",
+    )
+
+    # ── Regime detection (ADX strength + EMA direction) ──
+    higher_timeframe: str = Field(default="240", description="Higher TF for multi-TF trend confirmation; 240=4H")
+    require_higher_tf_confirmation: bool = Field(
+        default=True, description="Only enter trends aligned with the higher timeframe (cuts whipsaws)",
+    )
+    adx_period: int = Field(default=14, ge=5, le=50, description="ADX period")
+    adx_trend_threshold: float = Field(
+        default=25.0, ge=15.0, le=50.0, description="ADX above this = trending",
+    )
+    adx_range_threshold: float = Field(
+        default=20.0, ge=10.0, le=40.0,
+        description="ADX below this = ranging; between range/trend = transitional (stand aside)",
+    )
+    ema_fast: int = Field(default=50, ge=5, le=200, description="Fast EMA for trend direction")
+    ema_slow: int = Field(default=200, ge=20, le=400, description="Slow EMA for trend direction")
+
+    # ── Trend mode (Chandelier Exit) ──
+    atr_period: int = Field(default=22, ge=5, le=50, description="ATR period for stops / Chandelier")
+    chandelier_period: int = Field(
+        default=22, ge=5, le=100, description="Chandelier lookback (highest-high / lowest-low)",
+    )
+    chandelier_atr_mult: float = Field(
+        default=3.0, ge=1.0, le=6.0, description="Chandelier ATR multiple (crypto sweet spot 2.5-3.0)",
+    )
+
+    # ── Risk: fixed-fractional + account-level kill-switch ──
+    risk_per_trade_pct: float = Field(
+        default=0.015, ge=0.0025, le=0.05,
+        description="Equity fraction risked per trade; position is sized off the stop distance",
+    )
+    max_daily_loss_pct: float = Field(
+        default=0.06, ge=0.01, le=0.30,
+        description="Kill-switch: halt + flatten if account is down this much in a day",
+    )
+    max_total_drawdown_pct: float = Field(
+        default=0.20, ge=0.05, le=0.50,
+        description="Kill-switch: halt if total drawdown from equity peak exceeds this",
     )
 
 

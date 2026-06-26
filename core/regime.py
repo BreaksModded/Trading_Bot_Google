@@ -57,6 +57,38 @@ def classify_regime(
     return MarketRegime.TRANSITIONAL
 
 
+def classify_futures_regime(
+    adx: Optional[float],
+    ema_fast: Optional[float],
+    ema_slow: Optional[float],
+    *,
+    adx_trend: float = 25.0,
+    adx_range: float = 20.0,
+) -> MarketRegime:
+    """Classify regime for the futures bot using ADX (strength) + EMA (direction).
+
+    - ADX >= adx_trend  -> TRENDING_UP / TRENDING_DOWN by EMA direction
+    - ADX <  adx_range  -> RANGING (grid harvests chop)
+    - in between          -> TRANSITIONAL (stand aside; no new entries)
+
+    The transitional zone is deliberate: entering on weak/ambiguous strength is
+    where trend systems get whipsawed, so the bot stays flat there.
+    """
+    if adx is None or ema_fast is None or ema_slow is None:
+        return MarketRegime.TRANSITIONAL
+    try:
+        if math.isnan(adx) or math.isnan(ema_fast) or math.isnan(ema_slow):
+            return MarketRegime.TRANSITIONAL
+    except TypeError:
+        return MarketRegime.TRANSITIONAL
+
+    if adx >= adx_trend:
+        return MarketRegime.TRENDING_UP if ema_fast > ema_slow else MarketRegime.TRENDING_DOWN
+    if adx < adx_range:
+        return MarketRegime.RANGING
+    return MarketRegime.TRANSITIONAL
+
+
 def get_grid_params_for_regime(
     regime: MarketRegime,
     base_spacing: float,
