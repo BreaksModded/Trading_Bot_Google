@@ -611,7 +611,10 @@ class DashboardSettings(BaseSettings):
     host: str = Field(default="127.0.0.1", description="Dashboard bind host")
     port: int = Field(default=8000, ge=1024, le=65535, description="Dashboard port")
     username: str = Field(default="admin", description="Dashboard login username")
-    password: str = Field(default="changeme", description="Dashboard login password")
+    password: str = Field(default="changeme", description="Dashboard login password (plaintext fallback)")
+    password_hash: str = Field(
+        default="", description="bcrypt hash of the dashboard password (preferred over plaintext)",
+    )
     allowed_cors_origins: list[str] = Field(
         default=["*"],
         description="Allowed CORS origins; set to specific domains in production",
@@ -858,6 +861,25 @@ class Settings(BaseSettings):
             "exchange_testnet": self.exchange.testnet,
         }
         return data
+
+    def security_warnings(self) -> list[str]:
+        """Return a list of insecure-default warnings for the web dashboard."""
+        warns: list[str] = []
+        if not self.dashboard.password_hash and self.dashboard.password in ("", "changeme"):
+            warns.append(
+                "Dashboard password is the default — set DASHBOARD_PASSWORD_HASH "
+                "(bcrypt) or a non-default DASHBOARD_PASSWORD before exposing the dashboard."
+            )
+        if self.jwt.secret_key.startswith("CHANGE_THIS"):
+            warns.append(
+                "JWT secret is the default — set JWT_SECRET_KEY to a random 32+ char string."
+            )
+        if "*" in self.dashboard.allowed_cors_origins:
+            warns.append(
+                "CORS allows all origins ('*') — set DASHBOARD_ALLOWED_CORS_ORIGINS to your "
+                "dashboard URL in production."
+            )
+        return warns
 
     def save_defaults(self, path: Path | None = None) -> None:
         """Save current grid settings as defaults.json."""
