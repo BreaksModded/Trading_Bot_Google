@@ -650,6 +650,32 @@ class BybitExchangeClient:
             stopLoss=self._decimal_to_plain_str(sp), positionIdx=0,
         )
 
+    async def place_market_linear(
+        self, *, symbol: str, side: str, qty: float, reduce_only: bool = False,
+    ) -> str:
+        """Linear-perp market order (qty in base units). Used to open trend
+        positions (reduce_only=False) and to flatten them (reduce_only=True)."""
+        client = self._ensure_http()
+        rules = await self.get_symbol_rules(symbol)
+        q = self._round_down_to_step(Decimal(str(qty)), rules.qty_step)
+        if q < rules.min_qty:
+            raise ExchangeError(
+                f"Market qty below minimum after normalization: {q} < {rules.min_qty} for {symbol}"
+            )
+        params: dict[str, Any] = dict(
+            category="linear", symbol=symbol, side=side,
+            orderType="Market", qty=self._decimal_to_plain_str(q),
+        )
+        if reduce_only:
+            params["reduceOnly"] = True
+        response = await self._run_http(client.place_order, **params)
+        if response.get("retCode") != 0:
+            logger.error(
+                "{}: linear market order rejected — retCode={} retMsg={}",
+                symbol, response.get("retCode"), response.get("retMsg"),
+            )
+        return str(response.get("result", {}).get("orderId", ""))
+
     async def close_position_market(self, *, symbol: str, side: str, qty: float) -> str:
         """Flatten (part of) a position with a reduce-only market order.
 
