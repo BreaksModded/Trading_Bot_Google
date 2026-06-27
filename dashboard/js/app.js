@@ -373,8 +373,14 @@ function renderDecision(st) {
   txt('dec-adx', num(adx, 1));
   txt('dec-ema', ema);
   const htf = st.regime_htf;
-  const aligned = htf && regimeKind(htf) === k && (k === 'up' || k === 'down');
-  txt('dec-htf', htf == null ? '—' : (aligned ? 'Confirma (' + regimeLabel(htf) + ')' : 'No confirma (' + regimeLabel(htf) + ')'));
+  if (k !== 'up' && k !== 'down') {
+    txt('dec-htf', 'N/A');                  // la confirmación TF superior solo aplica en tendencia
+  } else if (htf == null) {
+    txt('dec-htf', '—');
+  } else {
+    const aligned = regimeKind(htf) === k;
+    txt('dec-htf', aligned ? 'Confirma (' + regimeLabel(htf) + ')' : 'No confirma (' + regimeLabel(htf) + ')');
+  }
   txt('dec-atr', st.indicators?.atr_pct != null ? pct(st.indicators.atr_pct * 100, 2) : '—');
 }
 function renderTimeline(hist) {
