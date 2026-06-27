@@ -170,8 +170,10 @@ class FuturesBot:
             pos = await self.pm.get_position()
             if self.mode != "flat" or not pos.is_flat or self.pm.has_open_orders():
                 await self._flatten_all("kill_switch")
+                pos = await self.pm.get_position()  # re-read post-flatten → reflects flat
             self._maybe_log_kill_switch(decision, equity)
             self.db.update_bot_state(status=BotStatus.PAUSED, message=decision.reason)
+            self._persist_halted_state(equity, free, pos)
             logger.warning("[it {}] HALTED — {} (manual resume required)", it, decision.reason)
             return
 
@@ -262,6 +264,17 @@ class FuturesBot:
             await self._log("INFO", "trend",
                             f"ENTER {decision.side} {opened.size} @ ~{live_price:.2f} "
                             f"stop={decision.stop.stop_price:.2f} risk={self.s.risk_per_trade_pct:.1%}")
+            # Record the entry so the dashboard shows the open (read/record layer only,
+            # reached only after `opened` is confirmed non-flat above). pnl=0 → excluded
+            # from win-rate/PF/avg/total (they count only ABS(pnl)>1e-12); the close is
+            # recorded separately in _close_position, so there is no double count.
+            await asyncio.to_thread(self.db.insert_trade, TradeRecord(
+                timestamp=datetime.now(UTC), side=decision.side,
+                price=opened.entry_price or live_price, qty=opened.size,
+                fee=0.0, pnl=0.0, status="filled", symbol=self.symbol,
+                order_type="Market", exchange_order_id=None,
+                metadata={"reason": "trend_entry", "regime": self._last_regime},
+            ))
         elif decision.action == "close":
             await self._close_position(position, decision.reason)
         elif decision.action == "hold":
@@ -464,7 +477,7 @@ class FuturesBot:
             now = datetime.now(UTC)
             # Throttle equity-curve writes to ~1/min (loop runs every ~10s).
             if self._last_equity_ts is None or (now - self._last_equity_ts).total_seconds() >= 60:
-                self.db.record_equity(capital=equity, drawdown_pct=self.risk._last_drawdown)
+                self.db.record_equity(capital=equity, drawdown_pct=self.risk._last_drawdown * 100)  # canonical: percentage (see record_equity)
                 self._last_equity_ts = now
             # Rolling regime timeline for the dashboard (last 48 cycles).
             self._regime_history.append(regime.value)
@@ -498,6 +511,46 @@ class FuturesBot:
             self.db.set_runtime_config("futures_state", blob)
         except Exception as exc:
             logger.debug("persist state failed: {}", exc)
+
+    def _persist_halted_state(self, equity, free, position) -> None:
+        """Keep futures_state fresh while HALTED.
+
+        The cycle returns before _persist_state when halted, which would freeze the
+        whole blob (stale updated_at -> "sin datos"; stale position -> phantom). Instead
+        of overwriting with a minimal blob (which would blank indicators/regime/timeline),
+        READ the last persisted blob and OVERLAY only what must stay coherent: a fresh
+        updated_at, the real (now flat) position, and trend_stop=None. indicators / regime
+        / regime_history / mode are left intact (last known). Equity-curve point is still
+        recorded (throttled) so there is no gap. Read/persist layer only — the halt
+        decision was already taken by the risk manager; nothing here changes it.
+        """
+        try:
+            now = datetime.now(UTC)
+            if self._last_equity_ts is None or (now - self._last_equity_ts).total_seconds() >= 60:
+                self.db.record_equity(capital=equity, drawdown_pct=self.risk._last_drawdown * 100)  # canonical: percentage (see record_equity)
+                self._last_equity_ts = now
+            blob = self.db.get_runtime_config("futures_state")
+            if not isinstance(blob, dict) or not blob:
+                # Booted already halted (no prior state): write a minimal coherent blob.
+                blob = {
+                    "mode": self.mode, "regime": self._last_regime, "regime_htf": None,
+                    "regime_history": list(self._regime_history), "symbol": self.symbol,
+                    "leverage": self.s.leverage, "equity": equity, "free": free,
+                    "peak_equity": self.risk.peak_equity, "funding_rate": self._funding_rate,
+                }
+            blob["updated_at"] = now.isoformat()
+            blob["equity"] = equity   # refresh: equity can drift (funding/fees) even flat
+            blob["free"] = free
+            blob["trend_stop"] = None
+            blob["position"] = {
+                "side": position.side, "size": position.size,
+                "entry": position.entry_price, "mark": position.mark_price,
+                "liq": position.liq_price, "uPnL": position.unrealized_pnl,
+                "leverage": position.leverage, "margin": position.margin,
+            }
+            self.db.set_runtime_config("futures_state", blob)
+        except Exception as exc:
+            logger.debug("persist halted state failed: {}", exc)
 
     async def _process_commands(self) -> None:
         try:
@@ -547,6 +600,8 @@ class FuturesBot:
             if self.mode == "grid":  # grid flips: place the partner on each fill
                 trade = await self.pm.handle_fill(ev)
                 if trade:
+                    # Stamp the regime the grid fill happened under (read-only label).
+                    trade.metadata = {**(trade.metadata or {}), "regime": self._last_regime}
                     await asyncio.to_thread(self.db.insert_trade, trade)
 
     async def _log(self, level: str, module: str, message: str) -> None:

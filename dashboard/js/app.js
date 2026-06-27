@@ -1,13 +1,15 @@
 /* ============================================================================
    GRIDBOT · Panel de Futuros — lógica de la aplicación
-   Vanilla JS. Auth JWT, capa de lectura de la API, WebSocket (señal de cambio)
-   con fallback a polling, router de pantallas y gráficos con Lightweight Charts.
+   Vanilla JS. Auth JWT, capa de lectura de la API, router de pantallas y gráficos
+   con Lightweight Charts. Refresco: polling frugal como base; el WebSocket solo
+   actúa como señal de cambio cuando hay contraseña en memoria (no tras recargar
+   con token), nunca como transporte de datos.
    ========================================================================== */
 (() => {
 'use strict';
 
 const TOKEN_KEY = 'gridbot_token';
-const POLL_FAST = 3000;   // sin WS
+const POLL_FAST = 5000;   // sin WS (el bot escribe estado cada ~10s → 5s sobra)
 const POLL_SLOW = 12000;  // con WS (latido de seguridad)
 
 const S = {
@@ -49,6 +51,12 @@ function signedPct(v, dp = 1) {
 }
 function num(v, dp = 2) { return (v == null || isNaN(v)) ? '—' : nf(dp).format(v); }
 function pnlClass(v) { return v > 0 ? 'pos' : (v < 0 ? 'neg' : 'neu'); }
+function pfLabel(s) {
+  if (!s) return '—';
+  if (s.profit_factor > 0) return num(s.profit_factor, 2);
+  if ((s.total_closed_trades || 0) > 0 && (s.gross_loss || 0) === 0) return '∞';  // racha 100% ganadora
+  return '—';                                                                      // sin cierres
+}
 
 function regimeKind(r) {
   const k = String(r || '').toLowerCase();
@@ -64,6 +72,25 @@ const regimeLabel = (r) => REG_LABEL[regimeKind(r)];
 const regimeColor = (r) => REG_COLOR[regimeKind(r)];
 const MODE_LABEL = { trend: 'Tendencia', grid: 'Grid', flat: 'Plano' };
 const modeLabel = (m) => MODE_LABEL[m] || (m || '—');
+const REASON_LABEL = {
+  chandelier_stop: 'Stop Chandelier',
+  trend_reversal: 'Cambio de tendencia',
+  htf_conflict: 'Conflicto TF superior',
+  range_entry: 'Reasignado a rango',
+  grid_atr_stop: 'Stop ATR de grid',
+  kill_switch: 'Kill-switch',
+  transitional: 'Zona transicional',
+  manual_flatten: 'Cierre manual',
+  grid_entry: 'Grid · entrada',
+  grid_tp: 'Grid · toma de beneficio',
+  trend_entry: 'Entrada tendencia',
+};
+function reasonLabel(code, side) {
+  if (!code) return '—';
+  const base = REASON_LABEL[code] || code;   // fallback: muestra el código crudo
+  if (code === 'trend_entry') return base + (side === 'Buy' ? ' ↑' : side === 'Sell' ? ' ↓' : '');
+  return base;
+}
 
 function timeHM(iso) {
   const d = parseTs(iso); if (!d) return '—';
@@ -202,34 +229,44 @@ async function tick() {
     renderPanel(S.panel);
   } catch (e) { /* 401 ya gestionado; 429/otros: reintenta en el siguiente tick */ }
   if (!S.cfg) loadConfig();                 // reintenta hasta éxito (config es estática)
-  if (TICK % 4 === 1) updateLatency();
-}
-function updateLatency() {
-  api('/trading/market')
-    .then((m) => txt('top-latency', m && m.latency_ms ? Math.round(m.latency_ms) + ' ms' : '—'))
-    .catch(() => {});
 }
 
 /* ── Render: shell (sidebar + topbar, siempre) ───────────── */
 function renderShell() {
   const ov = S.overview; if (!ov) return;
-  const st = ov.state || {}, risk = ov.risk || {};
+  const st = ov.state || {}, risk = ov.risk || {}, bot = ov.bot || {};
   const fresh = st.updated_at && (Date.now() - (parseTs(st.updated_at)?.getTime() || 0)) < 45000;
 
+  // Estado del bot: bot.status es la fuente PRIMARIA (running|paused|stopped, mantenido
+  // por update_bot_state); la frescura de updated_at solo detecta "sin contacto"
+  // (status=running pero sin updates recientes → posible caída del proceso).
+  const status = String(bot.status || '').toLowerCase();
+  let botLabel, botDot;
+  if (status === 'paused' || risk.halted) { botLabel = 'Pausado · kill-switch'; botDot = 'dot warn'; }
+  else if (status === 'stopped') { botLabel = 'Detenido'; botDot = 'dot off'; }
+  else if (status === 'running' && !fresh) { botLabel = 'Sin contacto'; botDot = 'dot warn'; }
+  else if (status === 'running') { botLabel = 'Bot en marcha'; botDot = 'dot'; }
+  else { botLabel = fresh ? 'Bot en marcha' : 'Sin datos'; botDot = fresh ? 'dot' : 'dot off'; }
+
   // sidebar
-  $('side-dot').className = 'dot' + (fresh ? '' : ' off');
-  txt('side-bot-status', fresh ? 'Bot en marcha' : 'Bot sin datos');
+  $('side-dot').className = botDot;
+  txt('side-bot-status', botLabel);
   txt('side-bot-detail', `MODO ${(modeLabel(st.mode) || '—').toUpperCase()} · ${st.leverage ? st.leverage + 'x' : '—'}`);
 
   // topbar
   txt('top-symbol', (st.symbol || '—') + (st.symbol ? ' · PERP' : ''));
   txt('top-regime', regimeLabel(st.regime));
   txt('top-mode', modeLabel(st.mode));
+  txt('top-latency', ov.latency_ms ? Math.round(ov.latency_ms) + ' ms' : '—');
 
   const halted = !!risk.halted;
   show('halted-banner', halted);
   if (halted) txt('halted-text', 'Bot detenido por kill-switch — requiere reanudación manual. Pulsa «Reanudar» para rebasar el pico y continuar.');
-  $('btn-resume').disabled = !halted;
+  const resumeBtn = $('btn-resume');
+  resumeBtn.disabled = !halted;
+  resumeBtn.title = halted
+    ? 'Reanudar: rebasa el pico de equity y continúa tras el kill-switch.'
+    : 'Reanudar solo está disponible con el kill-switch activo. No revive un bot parado: reinícialo en el servidor.';
 }
 
 /* ── Router ──────────────────────────────────────────────── */
@@ -268,7 +305,7 @@ function renderResumen() {
   const roe = hasPos && pos.margin ? (pos.uPnL / pos.margin) * 100 : null;
   txt('kpi-roe', 'ROE ' + (roe == null ? '—' : signedPct(roe)));
   txt('kpi-win', stats.win_rate != null ? pct(stats.win_rate, 1) : '—');
-  txt('kpi-pf', 'PF ' + (stats.profit_factor ? num(stats.profit_factor, 2) : '—'));
+  txt('kpi-pf', 'PF ' + pfLabel(stats));
 
   // Posición
   show('pos-flat', !hasPos); show('pos-detail', hasPos);
@@ -316,8 +353,11 @@ function renderResumen() {
 }
 function posTime(pos) {
   const want = pos.side === 'long' ? 'Buy' : 'Sell';
-  for (const t of S.trades) {              // newest-first
-    if (t.side === want && Math.abs(t.pnl || 0) < 1e-9) return 'hace ' + relTime(t.timestamp);
+  for (const t of S.trades) {              // reliable source: the recorded trend entry
+    if (t.side === want && meta(t).reason === 'trend_entry') return relTime(t.timestamp);
+  }
+  for (const t of S.trades) {              // fallback heuristic: grid fills also have pnl≈0 → approx
+    if (t.side === want && Math.abs(t.pnl || 0) < 1e-9) return '~' + relTime(t.timestamp);
   }
   return '—';
 }
@@ -333,8 +373,14 @@ function renderDecision(st) {
   txt('dec-adx', num(adx, 1));
   txt('dec-ema', ema);
   const htf = st.regime_htf;
-  const aligned = htf && regimeKind(htf) === k && (k === 'up' || k === 'down');
-  txt('dec-htf', htf == null ? '—' : (aligned ? 'Confirma (' + regimeLabel(htf) + ')' : 'No confirma (' + regimeLabel(htf) + ')'));
+  if (k !== 'up' && k !== 'down') {
+    txt('dec-htf', 'N/A');                  // la confirmación TF superior solo aplica en tendencia
+  } else if (htf == null) {
+    txt('dec-htf', '—');
+  } else {
+    const aligned = regimeKind(htf) === k;
+    txt('dec-htf', aligned ? 'Confirma (' + regimeLabel(htf) + ')' : 'No confirma (' + regimeLabel(htf) + ')');
+  }
   txt('dec-atr', st.indicators?.atr_pct != null ? pct(st.indicators.atr_pct * 100, 2) : '—');
 }
 function renderTimeline(hist) {
@@ -356,7 +402,7 @@ function renderRecent() {
       <td class="r mono">${money(t.price, priceDp(t.price))}</td>
       <td class="r mono">${num(t.qty, 4)}</td>
       <td class="r mono ${pnlClass(t.pnl)}">${signedMoney(t.pnl)}</td>
-      <td>${m.reason || '—'}</td></tr>`;
+      <td>${escapeHtml(reasonLabel(m.reason, t.side))}</td></tr>`;
   }).join('');
 }
 
@@ -374,7 +420,7 @@ function renderOperaciones() {
   txt('st-win', stats.win_rate != null ? pct(stats.win_rate, 1) : '—');
   txt('st-avgwin', stats.avg_win ? '+' + money(stats.avg_win) : '—');
   txt('st-avgloss', stats.avg_loss ? MINUS + money(stats.avg_loss) : '—');
-  txt('st-pf', stats.profit_factor ? num(stats.profit_factor, 2) : '—');
+  txt('st-pf', pfLabel(stats));
 
   const lev = ((S.overview || {}).state || {}).leverage || 1;
   let rows = S.trades.slice();
@@ -400,8 +446,8 @@ function renderOperaciones() {
       <td class="r mono">${money(notional)}</td>
       <td class="r mono ${pnlClass(t.pnl)}">${signedMoney(t.pnl)}</td>
       <td class="r mono ${pnlClass(t.pnl)}">${roe == null ? '—' : signedPct(roe)}</td>
-      <td>${m.reason || '—'}</td>
-      <td><span class="reg-dot"><span class="d" style="background:${rc}"></span>${rl}</span></td></tr>`;
+      <td>${escapeHtml(reasonLabel(m.reason, t.side))}</td>
+      <td><span class="reg-dot"><span class="d" style="background:${rc}"></span>${escapeHtml(rl)}</span></td></tr>`;
   }).join('');
 }
 function exportCSV() {
@@ -456,10 +502,10 @@ async function loadCircuitBreakers() {
       const bt = e.breaker_type === 'max_daily_loss' ? 'Pérdida diaria' : (e.breaker_type === 'max_total_drawdown' ? 'Drawdown total' : e.breaker_type);
       return `<tr>
         <td class="mono">${dateHM(e.timestamp)}</td>
-        <td>${bt}</td>
+        <td>${escapeHtml(bt)}</td>
         <td class="r mono neg">${pct((e.trigger_value || 0) * 100, 2)}</td>
         <td class="r mono">${pct((e.threshold || 0) * 100, 2)}</td>
-        <td class="mono">${e.action_taken || '—'}</td></tr>`;
+        <td class="mono">${escapeHtml(e.action_taken || '—')}</td></tr>`;
     }).join('');
   } catch (e) {}
 }
@@ -478,8 +524,8 @@ async function loadLogs() {
       const lv = String(e.level || 'INFO').toUpperCase();
       return `<div class="ln">
         <span class="t">${timeHM(e.timestamp)}</span>
-        <span class="lv lv-${lv.toLowerCase()}">${lv}</span>
-        <span class="md">${e.module || ''}</span>
+        <span class="lv lv-${lv.toLowerCase()}">${escapeHtml(lv)}</span>
+        <span class="md">${escapeHtml(e.module || '')}</span>
         <span class="ms">${escapeHtml(e.message || '')}</span></div>`;
     }).join('');
   } catch (e) { term.innerHTML = '<div class="ln"><span class="ms muted">No se pudieron cargar los eventos.</span></div>'; }
@@ -573,14 +619,24 @@ async function ensurePriceChart(hostId, height, tf, st) {
 }
 function updatePriceOverlays(C, st) {
   if (!C._candles || !C._candles.length) return;
-  // líneas de entrada / stop
-  if (C.entry) { C.candle.removePriceLine(C.entry); C.entry = null; }
-  if (C.stop) { C.candle.removePriceLine(C.stop); C.stop = null; }
   const pos = st.position || {};
   const hasPos = pos.side && pos.side !== 'flat' && Math.abs(pos.size || 0) > 1e-9;
-  if (hasPos && pos.entry) C.entry = C.candle.createPriceLine({ price: pos.entry, color: '#16140f', lineWidth: 1, lineStyle: 2, axisLabelVisible: true, title: 'Entrada' });
-  if (hasPos && st.trend_stop) C.stop = C.candle.createPriceLine({ price: st.trend_stop, color: '#c98a2b', lineWidth: 1, lineStyle: 2, axisLabelVisible: true, title: 'Stop' });
-  // marcadores (limitados a 30 más recientes, snap a la vela más cercana)
+  const entryPrice = (hasPos && pos.entry) ? pos.entry : null;
+  const stopPrice = (hasPos && st.trend_stop) ? st.trend_stop : null;
+
+  // Líneas de entrada/stop: recrear SOLO si el precio cambia (anti-parpadeo por tick).
+  if (entryPrice !== C._entryAt) {
+    if (C.entry) { C.candle.removePriceLine(C.entry); C.entry = null; }
+    if (entryPrice != null) C.entry = C.candle.createPriceLine({ price: entryPrice, color: '#16140f', lineWidth: 1, lineStyle: 2, axisLabelVisible: true, title: 'Entrada' });
+    C._entryAt = entryPrice;
+  }
+  if (stopPrice !== C._stopAt) {
+    if (C.stop) { C.candle.removePriceLine(C.stop); C.stop = null; }
+    if (stopPrice != null) C.stop = C.candle.createPriceLine({ price: stopPrice, color: '#c98a2b', lineWidth: 1, lineStyle: 2, axisLabelVisible: true, title: 'Stop' });
+    C._stopAt = stopPrice;
+  }
+
+  // Marcadores (máx 30, snap a la vela más cercana): re-llamar setMarkers SOLO si cambian.
   const times = C._candles.map((c) => c.time);
   const lo = times[0], hi = times[times.length - 1];
   const mk = [];
@@ -592,7 +648,8 @@ function updatePriceOverlays(C, st) {
     mk.push({ time: snap, position: buy ? 'belowBar' : 'aboveBar', color: buy ? '#0f7a52' : '#c8453a', shape: buy ? 'arrowUp' : 'arrowDown', text: buy ? 'C' : 'V' });
   }
   mk.sort((a, b) => a.time - b.time);
-  C.candle.setMarkers(mk);
+  const sig = mk.map((m) => m.time + m.shape).join('|');
+  if (sig !== C._mkSig) { C.candle.setMarkers(mk); C._mkSig = sig; }
 }
 function nearest(arr, v) { let best = arr[0], bd = Math.abs(arr[0] - v); for (const x of arr) { const d = Math.abs(x - v); if (d < bd) { bd = d; best = x; } } return best; }
 
@@ -648,13 +705,19 @@ async function ensureEquityChart() {
 }
 
 /* ── Controles ───────────────────────────────────────────── */
+const CONFIRM = {
+  flatten: 'Aplanar cierra la posición o el grid abiertos. El bot SIGUE corriendo y '
+         + 'volverá a operar en el próximo ciclo. ¿Aplanar ahora?',
+  stop: 'Parar APAGA el proceso del bot en el servidor. Tendrás que reiniciarlo '
+      + 'manualmente allí: «Reanudar» NO revive un bot parado. ¿Apagar el bot?',
+};
 async function control(action) {
-  const labels = { resume: 'reanudar', flatten: 'aplanar (cerrar posición/grid)', stop: 'parar el bot' };
-  if ((action === 'flatten' || action === 'stop') && !confirm('¿Seguro que quieres ' + labels[action] + '?')) return;
+  const labels = { resume: 'reanudar', flatten: 'aplanar', stop: 'parar el bot' };
+  if (CONFIRM[action] && !confirm(CONFIRM[action])) return;
   try {
     await api('/futures/control', { method: 'POST', body: JSON.stringify({ action }) });
     toast('Orden enviada: ' + labels[action]);
-    setTimeout(refreshAll, 800);
+    setTimeout(tick, 800);
   } catch (e) { toast('No se pudo enviar la orden', true); }
 }
 

@@ -183,10 +183,15 @@ class FuturesPositionManager:
         # (0 on opening fills). Recording it makes the grid's profit/loss real in
         # the dashboard stats instead of always 0.
         realized = float(fill_event.get("closedPnl") or 0.0)
+        # Dashboard label only (read-only metadata; not a trading decision): an opening
+        # leg vs a take-profit partner. Keep a clean metadata dict instead of the whole
+        # raw fill event.
+        reason = "grid_tp" if managed.is_partner else "grid_entry"
         return TradeRecord(
             timestamp=datetime.now(UTC), side=side, price=price, qty=qty,
             fee=fee, pnl=realized, status="filled", symbol=self.symbol,
-            order_type="Limit", exchange_order_id=order_id, metadata=fill_event,
+            order_type="Limit", exchange_order_id=order_id,
+            metadata={"reason": reason, "execId": exec_id},
         )
 
     # ── Reconciliation & teardown ─────────────────────────────────────

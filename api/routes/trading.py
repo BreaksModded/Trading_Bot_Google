@@ -11,16 +11,20 @@ router = APIRouter()
 
 
 @router.get("/trading/market")
-async def get_market_data(request: Request, username: str = Depends(verify_token)):
-    """Get current market data and exchange status."""
+async def get_market_data(
+    request: Request,
+    category: str = Query("linear", description="Bybit product category (linear = the futures perp)"),
+    username: str = Depends(verify_token),
+):
+    """Get current market data and exchange status (defaults to the linear perpetual)."""
     exchange = request.app.state.exchange
     settings = request.app.state.settings
 
-    symbol = settings.active_symbols[0] if settings.active_symbols else "BTCUSDC"
+    symbol = settings.futures.symbol or (settings.active_symbols[0] if settings.active_symbols else "BTCUSDT")
     result = {"symbol": symbol, "price": 0.0, "latency_ms": 0.0}
 
     try:
-        result["price"] = await exchange.get_last_price(symbol=symbol)
+        result["price"] = await exchange.get_last_price(symbol=symbol, category=category)
         result["latency_ms"] = getattr(request.app.state, "latest_latency_ms", 0.0)
     except Exception as e:
         result["error"] = str(e)
@@ -34,17 +38,22 @@ async def get_klines(
     symbol: str = Query(None, description="Trading pair symbol"),
     interval: str = Query("60", description="Kline interval (1, 5, 15, 60, 240, D)"),
     limit: int = Query(200, ge=10, le=1000),
+    category: str = Query("linear", description="Bybit product category (linear = the futures perp)"),
     username: str = Depends(verify_token),
 ):
-    """Get historical kline data for the chart."""
+    """Get historical kline data for the chart (defaults to the linear perpetual)."""
     exchange = request.app.state.exchange
     settings = request.app.state.settings
-    
-    target_symbol = symbol or (settings.active_symbols[0] if settings.active_symbols else "BTCUSDC")
-    
+
+    # Default to the FUTURES symbol the bot trades, not a (possibly spot) active symbol.
+    target_symbol = symbol or settings.futures.symbol or (
+        settings.active_symbols[0] if settings.active_symbols else "BTCUSDT"
+    )
+
     try:
-        # Pass the resolved symbol to get_klines
-        df = await exchange.get_klines(symbol=target_symbol, interval=interval, limit=limit)
+        df = await exchange.get_klines(
+            symbol=target_symbol, interval=interval, limit=limit, category=category,
+        )
         klines = df.to_dict(orient="records")
         for row in klines:
             if hasattr(row.get("timestamp"), "isoformat"):

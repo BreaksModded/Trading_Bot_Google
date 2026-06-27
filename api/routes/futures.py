@@ -25,8 +25,9 @@ class ControlRequest(BaseModel):
 async def overview(request: Request, _: str = Depends(verify_token)) -> dict:
     """Everything the dashboard needs in one read: state, risk, bot, stats."""
     db = request.app.state.db
+    symbol = request.app.state.settings.futures.symbol
     try:
-        stats = db.get_trade_stats()
+        stats = db.get_trade_stats(symbol=symbol)
     except Exception:
         stats = {}
     return {
@@ -34,6 +35,8 @@ async def overview(request: Request, _: str = Depends(verify_token)) -> dict:
         "risk": db.get_runtime_config("futures_risk_status") or {},
         "bot": db.get_bot_state() or {},
         "stats": stats,
+        # Cached latency kept fresh by the broadcast loop's ping(); avoids a REST call.
+        "latency_ms": getattr(request.app.state, "latest_latency_ms", 0.0),
     }
 
 
@@ -44,7 +47,8 @@ async def equity(request: Request, limit: int = 300, _: str = Depends(verify_tok
 
 @router.get("/futures/trades")
 async def trades(request: Request, limit: int = 50, _: str = Depends(verify_token)) -> dict:
-    return {"trades": request.app.state.db.get_recent_trades(limit=limit)}
+    symbol = request.app.state.settings.futures.symbol
+    return {"trades": request.app.state.db.get_recent_trades(limit=limit, symbol=symbol)}
 
 
 @router.get("/futures/config")
