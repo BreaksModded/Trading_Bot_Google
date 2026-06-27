@@ -619,14 +619,24 @@ async function ensurePriceChart(hostId, height, tf, st) {
 }
 function updatePriceOverlays(C, st) {
   if (!C._candles || !C._candles.length) return;
-  // líneas de entrada / stop
-  if (C.entry) { C.candle.removePriceLine(C.entry); C.entry = null; }
-  if (C.stop) { C.candle.removePriceLine(C.stop); C.stop = null; }
   const pos = st.position || {};
   const hasPos = pos.side && pos.side !== 'flat' && Math.abs(pos.size || 0) > 1e-9;
-  if (hasPos && pos.entry) C.entry = C.candle.createPriceLine({ price: pos.entry, color: '#16140f', lineWidth: 1, lineStyle: 2, axisLabelVisible: true, title: 'Entrada' });
-  if (hasPos && st.trend_stop) C.stop = C.candle.createPriceLine({ price: st.trend_stop, color: '#c98a2b', lineWidth: 1, lineStyle: 2, axisLabelVisible: true, title: 'Stop' });
-  // marcadores (limitados a 30 más recientes, snap a la vela más cercana)
+  const entryPrice = (hasPos && pos.entry) ? pos.entry : null;
+  const stopPrice = (hasPos && st.trend_stop) ? st.trend_stop : null;
+
+  // Líneas de entrada/stop: recrear SOLO si el precio cambia (anti-parpadeo por tick).
+  if (entryPrice !== C._entryAt) {
+    if (C.entry) { C.candle.removePriceLine(C.entry); C.entry = null; }
+    if (entryPrice != null) C.entry = C.candle.createPriceLine({ price: entryPrice, color: '#16140f', lineWidth: 1, lineStyle: 2, axisLabelVisible: true, title: 'Entrada' });
+    C._entryAt = entryPrice;
+  }
+  if (stopPrice !== C._stopAt) {
+    if (C.stop) { C.candle.removePriceLine(C.stop); C.stop = null; }
+    if (stopPrice != null) C.stop = C.candle.createPriceLine({ price: stopPrice, color: '#c98a2b', lineWidth: 1, lineStyle: 2, axisLabelVisible: true, title: 'Stop' });
+    C._stopAt = stopPrice;
+  }
+
+  // Marcadores (máx 30, snap a la vela más cercana): re-llamar setMarkers SOLO si cambian.
   const times = C._candles.map((c) => c.time);
   const lo = times[0], hi = times[times.length - 1];
   const mk = [];
@@ -638,7 +648,8 @@ function updatePriceOverlays(C, st) {
     mk.push({ time: snap, position: buy ? 'belowBar' : 'aboveBar', color: buy ? '#0f7a52' : '#c8453a', shape: buy ? 'arrowUp' : 'arrowDown', text: buy ? 'C' : 'V' });
   }
   mk.sort((a, b) => a.time - b.time);
-  C.candle.setMarkers(mk);
+  const sig = mk.map((m) => m.time + m.shape).join('|');
+  if (sig !== C._mkSig) { C.candle.setMarkers(mk); C._mkSig = sig; }
 }
 function nearest(arr, v) { let best = arr[0], bd = Math.abs(arr[0] - v); for (const x of arr) { const d = Math.abs(x - v); if (d < bd) { bd = d; best = x; } } return best; }
 
