@@ -62,3 +62,26 @@ def test_metrics_structure_is_complete():
         assert key in m
     assert len(res["equity_curve"]) > 0
     assert not math.isnan(m["net_pnl"])
+
+
+def test_funding_only_at_settlement_hours():
+    bt = _bt()
+    assert bt._funding_at(pd.Timestamp("2026-01-01 08:00"), None) == bt.funding_rate_8h
+    assert bt._funding_at(pd.Timestamp("2026-01-01 00:00"), None) == bt.funding_rate_8h
+    assert bt._funding_at(pd.Timestamp("2026-01-01 09:00"), None) is None  # not a settlement
+
+
+def test_funding_uses_historical_series():
+    bt = _bt()
+    fs = pd.Series({pd.Timestamp("2026-01-01 00:00"): 0.0005}).sort_index()
+    # asof picks the most recent rate at/before the settlement.
+    assert bt._funding_at(pd.Timestamp("2026-01-01 08:00"), fs) == 0.0005
+
+
+def test_htf_regime_series_aligns_to_bars():
+    bt = _bt()
+    df = _df([1000 + 2 * i for i in range(900)])  # enough 4H bars for EMA200
+    regs = bt._htf_regime(df)
+    assert len(regs) == len(df)
+    from core.regime import MarketRegime
+    assert all(isinstance(r, MarketRegime) for r in regs)
