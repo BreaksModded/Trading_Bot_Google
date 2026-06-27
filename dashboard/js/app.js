@@ -51,6 +51,12 @@ function signedPct(v, dp = 1) {
 }
 function num(v, dp = 2) { return (v == null || isNaN(v)) ? '—' : nf(dp).format(v); }
 function pnlClass(v) { return v > 0 ? 'pos' : (v < 0 ? 'neg' : 'neu'); }
+function pfLabel(s) {
+  if (!s) return '—';
+  if (s.profit_factor > 0) return num(s.profit_factor, 2);
+  if ((s.total_closed_trades || 0) > 0 && (s.gross_loss || 0) === 0) return '∞';  // racha 100% ganadora
+  return '—';                                                                      // sin cierres
+}
 
 function regimeKind(r) {
   const k = String(r || '').toLowerCase();
@@ -299,7 +305,7 @@ function renderResumen() {
   const roe = hasPos && pos.margin ? (pos.uPnL / pos.margin) * 100 : null;
   txt('kpi-roe', 'ROE ' + (roe == null ? '—' : signedPct(roe)));
   txt('kpi-win', stats.win_rate != null ? pct(stats.win_rate, 1) : '—');
-  txt('kpi-pf', 'PF ' + (stats.profit_factor ? num(stats.profit_factor, 2) : '—'));
+  txt('kpi-pf', 'PF ' + pfLabel(stats));
 
   // Posición
   show('pos-flat', !hasPos); show('pos-detail', hasPos);
@@ -408,7 +414,7 @@ function renderOperaciones() {
   txt('st-win', stats.win_rate != null ? pct(stats.win_rate, 1) : '—');
   txt('st-avgwin', stats.avg_win ? '+' + money(stats.avg_win) : '—');
   txt('st-avgloss', stats.avg_loss ? MINUS + money(stats.avg_loss) : '—');
-  txt('st-pf', stats.profit_factor ? num(stats.profit_factor, 2) : '—');
+  txt('st-pf', pfLabel(stats));
 
   const lev = ((S.overview || {}).state || {}).leverage || 1;
   let rows = S.trades.slice();
