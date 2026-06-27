@@ -459,6 +459,14 @@ class Database:
             return [dict(row) for row in reversed(cur.fetchall())]
 
     def record_equity(self, capital: float, drawdown_pct: float = 0.0) -> None:
+        """Append an equity-curve point.
+
+        Canonical unit for ``drawdown_pct`` is a PERCENTAGE (0-100) — matching the
+        ``_pct`` name and FuturesRiskManager.status() (which also stores ×100). NOTE:
+        rows written BEFORE this commit stored a FRACTION (0-1); old and new rows
+        coexist. No live reader uses this column today (the dashboard recomputes
+        drawdown from ``capital``), so this is hygiene for any future reader.
+        """
         with self._cursor() as cur:
             cur.execute(
                 "INSERT INTO equity_curve (timestamp, capital, drawdown_pct) VALUES (?, ?, ?)",

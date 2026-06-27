@@ -477,7 +477,7 @@ class FuturesBot:
             now = datetime.now(UTC)
             # Throttle equity-curve writes to ~1/min (loop runs every ~10s).
             if self._last_equity_ts is None or (now - self._last_equity_ts).total_seconds() >= 60:
-                self.db.record_equity(capital=equity, drawdown_pct=self.risk._last_drawdown)
+                self.db.record_equity(capital=equity, drawdown_pct=self.risk._last_drawdown * 100)  # canonical: percentage (see record_equity)
                 self._last_equity_ts = now
             # Rolling regime timeline for the dashboard (last 48 cycles).
             self._regime_history.append(regime.value)
@@ -527,7 +527,7 @@ class FuturesBot:
         try:
             now = datetime.now(UTC)
             if self._last_equity_ts is None or (now - self._last_equity_ts).total_seconds() >= 60:
-                self.db.record_equity(capital=equity, drawdown_pct=self.risk._last_drawdown)
+                self.db.record_equity(capital=equity, drawdown_pct=self.risk._last_drawdown * 100)  # canonical: percentage (see record_equity)
                 self._last_equity_ts = now
             blob = self.db.get_runtime_config("futures_state")
             if not isinstance(blob, dict) or not blob:
