@@ -228,12 +228,23 @@ async function tick() {
 /* ── Render: shell (sidebar + topbar, siempre) ───────────── */
 function renderShell() {
   const ov = S.overview; if (!ov) return;
-  const st = ov.state || {}, risk = ov.risk || {};
+  const st = ov.state || {}, risk = ov.risk || {}, bot = ov.bot || {};
   const fresh = st.updated_at && (Date.now() - (parseTs(st.updated_at)?.getTime() || 0)) < 45000;
 
+  // Estado del bot: bot.status es la fuente PRIMARIA (running|paused|stopped, mantenido
+  // por update_bot_state); la frescura de updated_at solo detecta "sin contacto"
+  // (status=running pero sin updates recientes → posible caída del proceso).
+  const status = String(bot.status || '').toLowerCase();
+  let botLabel, botDot;
+  if (status === 'paused' || risk.halted) { botLabel = 'Pausado · kill-switch'; botDot = 'dot warn'; }
+  else if (status === 'stopped') { botLabel = 'Detenido'; botDot = 'dot off'; }
+  else if (status === 'running' && !fresh) { botLabel = 'Sin contacto'; botDot = 'dot warn'; }
+  else if (status === 'running') { botLabel = 'Bot en marcha'; botDot = 'dot'; }
+  else { botLabel = fresh ? 'Bot en marcha' : 'Sin datos'; botDot = fresh ? 'dot' : 'dot off'; }
+
   // sidebar
-  $('side-dot').className = 'dot' + (fresh ? '' : ' off');
-  txt('side-bot-status', fresh ? 'Bot en marcha' : 'Bot sin datos');
+  $('side-dot').className = botDot;
+  txt('side-bot-status', botLabel);
   txt('side-bot-detail', `MODO ${(modeLabel(st.mode) || '—').toUpperCase()} · ${st.leverage ? st.leverage + 'x' : '—'}`);
 
   // topbar
