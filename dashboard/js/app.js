@@ -256,7 +256,11 @@ function renderShell() {
   const halted = !!risk.halted;
   show('halted-banner', halted);
   if (halted) txt('halted-text', 'Bot detenido por kill-switch — requiere reanudación manual. Pulsa «Reanudar» para rebasar el pico y continuar.');
-  $('btn-resume').disabled = !halted;
+  const resumeBtn = $('btn-resume');
+  resumeBtn.disabled = !halted;
+  resumeBtn.title = halted
+    ? 'Reanudar: rebasa el pico de equity y continúa tras el kill-switch.'
+    : 'Reanudar solo está disponible con el kill-switch activo. No revive un bot parado: reinícialo en el servidor.';
 }
 
 /* ── Router ──────────────────────────────────────────────── */
@@ -678,9 +682,15 @@ async function ensureEquityChart() {
 }
 
 /* ── Controles ───────────────────────────────────────────── */
+const CONFIRM = {
+  flatten: 'Aplanar cierra la posición o el grid abiertos. El bot SIGUE corriendo y '
+         + 'volverá a operar en el próximo ciclo. ¿Aplanar ahora?',
+  stop: 'Parar APAGA el proceso del bot en el servidor. Tendrás que reiniciarlo '
+      + 'manualmente allí: «Reanudar» NO revive un bot parado. ¿Apagar el bot?',
+};
 async function control(action) {
-  const labels = { resume: 'reanudar', flatten: 'aplanar (cerrar posición/grid)', stop: 'parar el bot' };
-  if ((action === 'flatten' || action === 'stop') && !confirm('¿Seguro que quieres ' + labels[action] + '?')) return;
+  const labels = { resume: 'reanudar', flatten: 'aplanar', stop: 'parar el bot' };
+  if (CONFIRM[action] && !confirm(CONFIRM[action])) return;
   try {
     await api('/futures/control', { method: 'POST', body: JSON.stringify({ action }) });
     toast('Orden enviada: ' + labels[action]);
