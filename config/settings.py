@@ -484,6 +484,114 @@ class RiskSettings(BaseSettings):
     )
 
 
+# ── Futures (Linear Perpetuals) ───────────────────────────────
+class FuturesSettings(BaseSettings):
+    """Linear perpetual (USDT) futures neutral-grid configuration.
+
+    Replaces the legacy spot grid. A NEUTRAL grid places LONG limit orders
+    below the mid price and SHORT limit orders above it, profiting from
+    oscillation in *both* directions. Risk is bounded by a hard stop-loss and
+    conservative leverage so the liquidation price sits far outside the grid
+    range. Single-symbol by design (the spot multi-pair sprawl is removed).
+    """
+
+    model_config = SettingsConfigDict(env_prefix="FUTURES_")
+
+    enabled: bool = Field(default=True, description="Run the futures bot (vs legacy spot)")
+    symbol: str = Field(default="ETHUSDT", description="Linear perpetual symbol (USDT-margined)")
+    category: str = Field(default="linear", description="Bybit product category")
+    leverage: int = Field(default=2, ge=1, le=10, description="Account leverage (conservative 2-3x)")
+    position_mode: str = Field(default="one-way", description="one-way | hedge")
+    margin_mode: str = Field(default="ISOLATED", description="ISOLATED (set on exchange side)")
+    timeframe: str = Field(default="60", description="Primary kline interval for signals (minutes); 60=1H")
+    loop_interval_seconds: int = Field(default=10, ge=3, le=120, description="Main loop cadence")
+
+    # ── Grid geometry ──
+    grid_levels: int = Field(default=8, ge=2, le=30, description="Limit levels per side of mid")
+    use_atr_range: bool = Field(default=True, description="Derive half-range from ATR instead of fixed pct")
+    grid_range_atr_multiple: float = Field(
+        default=2.5, ge=0.5, le=6.0, description="Half-range = ATR%% x this multiple",
+    )
+    grid_range_pct: float = Field(
+        default=0.10, ge=0.02, le=0.50, description="Fixed half-range if use_atr_range=False (10%%)",
+    )
+    min_spacing_pct: float = Field(
+        default=0.004, ge=0.001, le=0.05,
+        description="Minimum profit per grid step (must cover fees + funding buffer)",
+    )
+
+    # ── Sizing ──
+    capital_fraction: float = Field(
+        default=0.80, ge=0.10, le=1.00, description="Fraction of available margin to deploy",
+    )
+    order_size_usdt: float = Field(
+        default=0.0, ge=0.0, description="Fixed notional per level; 0 = auto from capital",
+    )
+    min_order_usdt: float = Field(default=5.0, gt=0, description="Exchange minimum notional floor")
+
+    # ── Risk ──
+    stop_loss_pct: float = Field(
+        default=0.12, ge=0.02, le=0.50,
+        description="Hard stop: close everything if price exits the grid range by this much",
+    )
+    min_liquidation_buffer_pct: float = Field(
+        default=0.15, ge=0.05, le=0.50,
+        description="Require the liquidation price to sit at least this far beyond the grid",
+    )
+
+    # ── Recenter ──
+    recenter_after_stop: bool = Field(
+        default=True, description="Rebuild a fresh grid after a stop-loss episode",
+    )
+    recenter_cooldown_minutes: int = Field(
+        default=30, ge=0, le=720, description="Cooldown before rebuilding after a stop",
+    )
+
+    # ── Regime detection (ADX strength + EMA direction) ──
+    higher_timeframe: str = Field(default="240", description="Higher TF for multi-TF trend confirmation; 240=4H")
+    require_higher_tf_confirmation: bool = Field(
+        default=True, description="Only enter trends aligned with the higher timeframe (cuts whipsaws)",
+    )
+    adx_period: int = Field(default=14, ge=5, le=50, description="ADX period")
+    adx_trend_threshold: float = Field(
+        default=25.0, ge=15.0, le=50.0, description="ADX above this = trending",
+    )
+    adx_range_threshold: float = Field(
+        default=20.0, ge=10.0, le=40.0,
+        description="ADX below this = ranging; between range/trend = transitional (stand aside)",
+    )
+    ema_fast: int = Field(default=50, ge=5, le=200, description="Fast EMA for trend direction")
+    ema_slow: int = Field(default=200, ge=20, le=400, description="Slow EMA for trend direction")
+
+    # ── Trend mode (Chandelier Exit) ──
+    atr_period: int = Field(default=22, ge=5, le=50, description="ATR period for stops / Chandelier")
+    chandelier_period: int = Field(
+        default=22, ge=5, le=100, description="Chandelier lookback (highest-high / lowest-low)",
+    )
+    chandelier_atr_mult: float = Field(
+        default=3.0, ge=1.0, le=6.0, description="Chandelier ATR multiple (crypto sweet spot 2.5-3.0)",
+    )
+
+    # ── Risk: fixed-fractional + account-level kill-switch ──
+    risk_per_trade_pct: float = Field(
+        default=0.015, ge=0.0025, le=0.05,
+        description="Equity fraction risked per trade; position is sized off the stop distance",
+    )
+    grid_risk_pct: float = Field(
+        default=0.04, ge=0.0, le=0.20,
+        description="Cap the grid's worst-case loss (one side filled + stop band) to this "
+                    "fraction of capital; 0 disables the cap (raw leverage sizing)",
+    )
+    max_daily_loss_pct: float = Field(
+        default=0.06, ge=0.01, le=0.30,
+        description="Kill-switch: halt + flatten if account is down this much in a day",
+    )
+    max_total_drawdown_pct: float = Field(
+        default=0.20, ge=0.05, le=0.50,
+        description="Kill-switch: halt if total drawdown from equity peak exceeds this",
+    )
+
+
 # ── Telegram ──────────────────────────────────────────────────
 class TelegramSettings(BaseSettings):
     """Telegram notification settings."""
@@ -504,7 +612,10 @@ class DashboardSettings(BaseSettings):
     host: str = Field(default="127.0.0.1", description="Dashboard bind host")
     port: int = Field(default=8000, ge=1024, le=65535, description="Dashboard port")
     username: str = Field(default="admin", description="Dashboard login username")
-    password: str = Field(default="changeme", description="Dashboard login password")
+    password: str = Field(default="changeme", description="Dashboard login password (plaintext fallback)")
+    password_hash: str = Field(
+        default="", description="bcrypt hash of the dashboard password (preferred over plaintext)",
+    )
     allowed_cors_origins: list[str] = Field(
         default=["*"],
         description="Allowed CORS origins; set to specific domains in production",
@@ -586,6 +697,7 @@ class Settings(BaseSettings):
     grid: GridSettings = Field(default_factory=GridSettings)
     indicators: IndicatorSettings = Field(default_factory=IndicatorSettings)
     risk: RiskSettings = Field(default_factory=RiskSettings)
+    futures: FuturesSettings = Field(default_factory=FuturesSettings)
     telegram: TelegramSettings = Field(default_factory=TelegramSettings)
     dashboard: DashboardSettings = Field(default_factory=DashboardSettings)
     jwt: JWTSettings = Field(default_factory=JWTSettings)
@@ -750,6 +862,25 @@ class Settings(BaseSettings):
             "exchange_testnet": self.exchange.testnet,
         }
         return data
+
+    def security_warnings(self) -> list[str]:
+        """Return a list of insecure-default warnings for the web dashboard."""
+        warns: list[str] = []
+        if not self.dashboard.password_hash and self.dashboard.password in ("", "changeme"):
+            warns.append(
+                "Dashboard password is the default — set DASHBOARD_PASSWORD_HASH "
+                "(bcrypt) or a non-default DASHBOARD_PASSWORD before exposing the dashboard."
+            )
+        if self.jwt.secret_key.startswith("CHANGE_THIS"):
+            warns.append(
+                "JWT secret is the default — set JWT_SECRET_KEY to a random 32+ char string."
+            )
+        if "*" in self.dashboard.allowed_cors_origins:
+            warns.append(
+                "CORS allows all origins ('*') — set DASHBOARD_ALLOWED_CORS_ORIGINS to your "
+                "dashboard URL in production."
+            )
+        return warns
 
     def save_defaults(self, path: Path | None = None) -> None:
         """Save current grid settings as defaults.json."""

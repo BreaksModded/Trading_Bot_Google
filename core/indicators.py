@@ -101,6 +101,31 @@ def compute_rsi(series: pd.Series, period: int = 14) -> pd.Series:
     return rsi.fillna(50.0)  # Neutral when insufficient data
 
 
+def compute_chandelier_exit(
+    df: pd.DataFrame, *, period: int = 22, atr_mult: float = 3.0, atr_period: int | None = None,
+) -> pd.DataFrame:
+    """Chandelier Exit trailing-stop levels (Chuck LeBeau).
+
+    long_stop  = highest_high(period) - ATR(atr_period) * atr_mult
+    short_stop = lowest_low(period)   + ATR(atr_period) * atr_mult
+
+    A long position trails its stop at ``long_stop`` (exit if close drops below);
+    a short trails at ``short_stop`` (exit if close rises above). The ratchet
+    (stop only moves in the favourable direction) is applied statefully by the
+    trend module — this function returns the raw per-bar levels.
+
+    Validated default for crypto trend-following: period=22, atr_mult≈2.5-3.0.
+    """
+    ap = atr_period if atr_period is not None else period
+    atr = compute_atr(df, period=ap)
+    highest_high = df["high"].rolling(window=period, min_periods=1).max()
+    lowest_low = df["low"].rolling(window=period, min_periods=1).min()
+    out = pd.DataFrame(index=df.index)
+    out["chandelier_long"] = highest_high - atr * atr_mult
+    out["chandelier_short"] = lowest_low + atr * atr_mult
+    return out
+
+
 def enrich_indicators(
     df: pd.DataFrame,
     *,

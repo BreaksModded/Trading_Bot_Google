@@ -63,6 +63,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             "Dashboard API started on {}:{}",
             settings.dashboard.host, settings.dashboard.port,
         )
+        for _warning in settings.security_warnings():
+            logger.warning("[SECURITY] {}", _warning)
         try:
             yield
         finally:
@@ -85,11 +87,13 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.state.latest_latency_ms = 0.0
     app.state.broadcast_task = None
 
-    # CORS — M18: configurable origins
+    # CORS — '*' origins are incompatible with credentials (and insecure);
+    # disable credentials automatically when origins are wildcarded.
+    cors_origins = settings.dashboard.allowed_cors_origins
     app.add_middleware(
         CORSMiddleware,
-        allow_origins=settings.dashboard.allowed_cors_origins,
-        allow_credentials=True,
+        allow_origins=cors_origins,
+        allow_credentials="*" not in cors_origins,
         allow_methods=["*"],
         allow_headers=["*"],
     )
@@ -113,6 +117,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     from api.routes.portfolio import router as portfolio_router
     app.include_router(portfolio_router, prefix="/api")
+
+    from api.routes.futures import router as futures_router
+    app.include_router(futures_router, prefix="/api")
 
     from api.websocket import router as ws_router
     app.include_router(ws_router)

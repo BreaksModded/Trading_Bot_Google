@@ -1,600 +1,422 @@
 <!DOCTYPE html>
 <html lang="es">
-
 <head>
-  <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Trading Bot Dashboard — Grid Dinámico ATR/ADX</title>
-  <meta name="description"
-    content="Professional algorithmic trading bot dashboard with real-time monitoring and control">
-  <link rel="stylesheet" href="/css/styles.css">
-  <script
-    src="https://cdn.jsdelivr.net/npm/lightweight-charts@4.1.0/dist/lightweight-charts.standalone.production.js"></script>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Futures Bot · Panel de Control</title>
+<style>
+  :root{
+    --bg:#0a0e16; --bg2:#0e131e; --surface:#141b29; --surface2:#1a2333;
+    --border:#243049; --border2:#2e3c59;
+    --text:#e8eef9; --muted:#8a98b4; --faint:#5b6680;
+    --accent:#3b82f6; --accent2:#2dd4bf;
+    --green:#22c55e; --red:#ef4444; --amber:#f59e0b; --violet:#8b5cf6;
+    --r:14px; --r2:10px;
+    --shadow:0 6px 24px rgba(0,0,0,.35);
+    --mono:'SFMono-Regular',ui-monospace,'JetBrains Mono',Menlo,Consolas,monospace;
+    --sans:system-ui,-apple-system,'Segoe UI',Roboto,Inter,sans-serif;
+  }
+  *{box-sizing:border-box;margin:0;padding:0}
+  body{background:radial-gradient(1200px 600px at 20% -10%,#13203a 0%,var(--bg) 55%);
+    color:var(--text);font-family:var(--sans);font-size:14px;line-height:1.45;
+    min-height:100vh;-webkit-font-smoothing:antialiased}
+  .hidden{display:none!important}
+  .mono{font-family:var(--mono);font-variant-numeric:tabular-nums}
+  .pos{color:var(--green)} .neg{color:var(--red)} .mut{color:var(--muted)}
+
+  .topbar{display:flex;align-items:center;gap:18px;padding:14px 24px;
+    border-bottom:1px solid var(--border);background:rgba(10,14,22,.7);
+    backdrop-filter:blur(12px);position:sticky;top:0;z-index:20}
+  .brand{display:flex;align-items:center;gap:10px;font-weight:700;letter-spacing:.3px}
+  .brand .logo{width:30px;height:30px;border-radius:9px;display:grid;place-items:center;
+    background:linear-gradient(135deg,var(--accent),var(--accent2));font-size:16px}
+  .brand small{display:block;font-weight:500;color:var(--muted);font-size:11px;letter-spacing:.5px}
+  .sym{padding:5px 11px;border:1px solid var(--border2);border-radius:99px;font-weight:600;
+    font-family:var(--mono);font-size:13px;background:var(--surface)}
+  .spacer{flex:1}
+  .pill{display:inline-flex;align-items:center;gap:7px;padding:6px 13px;border-radius:99px;
+    font-weight:600;font-size:12.5px;border:1px solid var(--border2);background:var(--surface)}
+  .dot{width:8px;height:8px;border-radius:50%;background:var(--faint)}
+  .dot.on{background:var(--green);box-shadow:0 0 10px var(--green);animation:pulse 2s infinite}
+  .dot.warn{background:var(--amber);box-shadow:0 0 10px var(--amber)}
+  .dot.off{background:var(--red);box-shadow:0 0 10px var(--red)}
+  @keyframes pulse{0%,100%{opacity:1}50%{opacity:.45}}
+  .conn{display:flex;align-items:center;gap:7px;color:var(--muted);font-size:12px}
+  .btn{padding:8px 14px;border-radius:var(--r2);border:1px solid var(--border2);
+    background:var(--surface2);color:var(--text);font-weight:600;cursor:pointer;font-size:12.5px;transition:.15s}
+  .btn:hover{border-color:var(--accent);background:#1e2a40}
+  .btn.ghost{background:transparent}
+  .btn.danger:hover{border-color:var(--red);color:#fff;background:rgba(239,68,68,.15)}
+  .btn.ok:hover{border-color:var(--green);background:rgba(34,197,94,.15)}
+
+  .wrap{padding:22px 24px;max-width:1480px;margin:0 auto;display:flex;flex-direction:column;gap:18px}
+  .kpis{display:grid;grid-template-columns:repeat(4,1fr);gap:16px}
+  .main{display:grid;grid-template-columns:1.6fr 1fr;gap:18px;align-items:start}
+  .col{display:flex;flex-direction:column;gap:18px}
+  @media(max-width:980px){.kpis{grid-template-columns:repeat(2,1fr)}.main{grid-template-columns:1fr}}
+  @media(max-width:560px){.kpis{grid-template-columns:1fr}}
+
+  .card{background:linear-gradient(180deg,var(--surface),var(--bg2));border:1px solid var(--border);
+    border-radius:var(--r);box-shadow:var(--shadow);overflow:hidden}
+  .card .hd{display:flex;align-items:center;justify-content:space-between;padding:13px 17px;
+    border-bottom:1px solid var(--border);font-size:12px;font-weight:600;letter-spacing:.6px;
+    text-transform:uppercase;color:var(--muted)}
+  .card .bd{padding:17px}
+  .kpi{padding:16px 18px}
+  .kpi .lbl{font-size:11.5px;letter-spacing:.7px;text-transform:uppercase;color:var(--muted)}
+  .kpi .val{font-size:27px;font-weight:700;font-family:var(--mono);margin-top:6px;letter-spacing:-.5px}
+  .kpi .sub{font-size:12px;margin-top:4px;color:var(--muted);font-family:var(--mono)}
+  .kpi .ic{float:right;width:36px;height:36px;border-radius:10px;display:grid;place-items:center;
+    font-size:17px;background:var(--surface2);border:1px solid var(--border2)}
+
+  .regime{display:flex;align-items:center;gap:16px}
+  .regime .badge{flex:0 0 auto;width:84px;height:84px;border-radius:18px;display:grid;place-items:center;
+    font-size:38px;font-weight:800;border:2px solid var(--border2);background:var(--surface2)}
+  .regime .meta{flex:1;display:flex;flex-direction:column;gap:3px}
+  .regime .meta b{font-size:18px}
+  .indi{display:grid;grid-template-columns:1fr 1fr;gap:9px;margin-top:14px}
+  .indi .i{background:var(--surface2);border:1px solid var(--border);border-radius:var(--r2);padding:9px 12px}
+  .indi .i .k{font-size:10.5px;color:var(--muted);text-transform:uppercase;letter-spacing:.5px}
+  .indi .i .v{font-family:var(--mono);font-size:15px;font-weight:600;margin-top:2px}
+
+  .pgrid{display:grid;grid-template-columns:1fr 1fr;gap:11px 18px}
+  .pgrid .row{display:flex;justify-content:space-between;border-bottom:1px dashed var(--border);padding-bottom:7px}
+  .pgrid .row .k{color:var(--muted);font-size:12.5px}
+  .pgrid .row .v{font-family:var(--mono);font-weight:600}
+  .sidetag{display:inline-flex;align-items:center;gap:6px;padding:3px 10px;border-radius:7px;font-weight:700;font-size:12px}
+  .sidetag.long{background:rgba(34,197,94,.14);color:var(--green);border:1px solid rgba(34,197,94,.35)}
+  .sidetag.short{background:rgba(239,68,68,.14);color:var(--red);border:1px solid rgba(239,68,68,.35)}
+  .empty{text-align:center;color:var(--faint);padding:24px 0;font-size:13px}
+
+  .gauge{margin-bottom:15px}
+  .gauge .top{display:flex;justify-content:space-between;font-size:12.5px;margin-bottom:6px}
+  .gauge .top .v{font-family:var(--mono);font-weight:600}
+  .track{height:9px;border-radius:99px;background:var(--surface2);position:relative;overflow:hidden;border:1px solid var(--border)}
+  .track .fill{height:100%;border-radius:99px;transition:width .4s ease,background .3s}
+  .halted{display:flex;align-items:center;gap:10px;padding:11px 14px;border-radius:var(--r2);
+    background:rgba(239,68,68,.12);border:1px solid rgba(239,68,68,.4);color:#fecaca;font-weight:600;margin-bottom:14px}
+  .controls{display:flex;gap:9px;margin-top:6px}
+  .controls .btn{flex:1;text-align:center}
+
+  .chart-wrap{position:relative;height:240px}
+  canvas{width:100%;height:100%;display:block}
+  .chart-meta{display:flex;gap:20px;padding:0 17px 15px}
+  .chart-meta div{font-size:12px;color:var(--muted)}
+  .chart-meta b{display:block;font-family:var(--mono);font-size:16px;color:var(--text);margin-top:2px}
+
+  table{width:100%;border-collapse:collapse;font-size:13px}
+  th{text-align:left;color:var(--muted);font-weight:600;font-size:11px;text-transform:uppercase;
+    letter-spacing:.5px;padding:9px 17px;border-bottom:1px solid var(--border);position:sticky;top:0;background:var(--bg2)}
+  td{padding:9px 17px;border-bottom:1px solid rgba(36,48,73,.5);font-family:var(--mono)}
+  tbody tr:hover{background:rgba(59,130,246,.06)}
+  .tb-scroll{max-height:330px;overflow-y:auto}
+  .tag{padding:2px 8px;border-radius:6px;font-size:11px;font-weight:600}
+  .tag.buy{background:rgba(34,197,94,.14);color:var(--green)}
+  .tag.sell{background:rgba(239,68,68,.14);color:var(--red)}
+
+  .overlay{position:fixed;inset:0;display:grid;place-items:center;
+    background:radial-gradient(800px 400px at 50% 0%,#15243f,#070a11);z-index:50}
+  .login{width:360px;max-width:90vw;background:var(--surface);border:1px solid var(--border);
+    border-radius:18px;padding:30px;box-shadow:var(--shadow)}
+  .login h1{font-size:19px;margin-bottom:4px}
+  .login p{color:var(--muted);font-size:13px;margin-bottom:22px}
+  .login label{display:block;font-size:12px;color:var(--muted);margin:14px 0 6px}
+  .login input{width:100%;padding:11px 13px;border-radius:var(--r2);border:1px solid var(--border2);
+    background:var(--bg2);color:var(--text);font-size:14px;font-family:var(--mono)}
+  .login input:focus{outline:none;border-color:var(--accent)}
+  .login .btn{width:100%;margin-top:22px;padding:12px;background:linear-gradient(135deg,var(--accent),#2563eb);border:none}
+  .err{color:var(--red);font-size:12.5px;margin-top:12px;min-height:16px;text-align:center}
+  .toast{position:fixed;bottom:24px;left:50%;transform:translateX(-50%);background:var(--surface2);
+    border:1px solid var(--border2);padding:11px 18px;border-radius:var(--r2);box-shadow:var(--shadow);
+    z-index:60;opacity:0;transition:.3s;pointer-events:none}
+  .toast.show{opacity:1;bottom:34px}
+</style>
 </head>
-
 <body>
-  <div class="app-layout">
 
-    <!-- ═══ Sidebar ═══ -->
-    <aside class="sidebar" id="sidebar">
-      <div class="sidebar-logo">
-        <span style="font-size:1.6rem">🤖</span>
-        <div>
-          <h1>GridBot</h1>
-          <span class="version">v1.0</span>
+<div id="login" class="overlay">
+  <form class="login" onsubmit="doLogin(event)">
+    <div class="brand" style="margin-bottom:18px"><span class="logo">⚡</span>
+      <div>Futures Bot<small>PANEL DE CONTROL</small></div></div>
+    <h1>Iniciar sesión</h1>
+    <p>Acceso al panel de control del bot de futuros.</p>
+    <label>Usuario</label><input id="u" autocomplete="username" value="admin">
+    <label>Contraseña</label><input id="p" type="password" autocomplete="current-password">
+    <button class="btn" type="submit">Entrar</button>
+    <div class="err" id="loginErr"></div>
+  </form>
+</div>
+
+<div id="app" class="hidden">
+  <header class="topbar">
+    <div class="brand"><span class="logo">⚡</span><div>Futures Bot<small>REGIME-SWITCHING</small></div></div>
+    <span class="sym" id="sym">—</span>
+    <span class="pill"><span class="dot" id="botDot"></span><span id="botStatus">—</span></span>
+    <span class="pill" id="modePill" style="display:none"></span>
+    <div class="spacer"></div>
+    <div class="conn"><span class="dot" id="connDot"></span><span id="connTxt">conectando…</span><span id="updTime" class="mut"></span></div>
+    <button class="btn ghost" onclick="logout()">Salir</button>
+  </header>
+
+  <div class="wrap">
+    <section class="kpis">
+      <div class="card kpi"><span class="ic">💰</span><div class="lbl">Equity</div>
+        <div class="val mono" id="kEquity">—</div><div class="sub" id="kEquitySub">—</div></div>
+      <div class="card kpi"><span class="ic">📈</span><div class="lbl">PnL Total (MTM)</div>
+        <div class="val mono" id="kPnl">—</div><div class="sub" id="kPnlSub">desde inicio</div></div>
+      <div class="card kpi"><span class="ic">🎯</span><div class="lbl">Win Rate</div>
+        <div class="val mono" id="kWin">—</div><div class="sub" id="kWinSub">—</div></div>
+      <div class="card kpi"><span class="ic">⚖️</span><div class="lbl">Profit Factor</div>
+        <div class="val mono" id="kPf">—</div><div class="sub" id="kPfSub">—</div></div>
+    </section>
+
+    <div class="main">
+      <div class="col">
+        <div class="card">
+          <div class="hd">Curva de Equity <span class="mut mono" id="eqRange"></span></div>
+          <div class="chart-wrap"><canvas id="eqChart"></canvas></div>
+          <div class="chart-meta">
+            <div>Pico<b class="mono" id="eqPeak">—</b></div>
+            <div>Mínimo<b class="mono" id="eqMin">—</b></div>
+            <div>Drawdown<b class="mono" id="eqDd">—</b></div>
+          </div>
+        </div>
+        <div class="card">
+          <div class="hd">Operaciones recientes</div>
+          <div class="tb-scroll">
+            <table><thead><tr><th>Hora</th><th>Lado</th><th>Precio</th><th>Qty</th><th>PnL</th><th>Motivo</th></tr></thead>
+            <tbody id="trades"><tr><td colspan="6" class="empty">Sin operaciones todavía</td></tr></tbody></table>
+          </div>
         </div>
       </div>
 
-      <nav class="sidebar-nav">
-        <div class="nav-item active" data-panel="overview">
-          <span class="icon">📊</span> Overview
+      <div class="col">
+        <div class="card">
+          <div class="hd">Régimen de mercado</div>
+          <div class="bd">
+            <div class="regime">
+              <div class="badge" id="regBadge">—</div>
+              <div class="meta"><b id="regName">—</b><span class="mut" id="regDesc">—</span>
+                <span class="mut" style="font-size:12px">Modo: <span id="regMode" style="color:var(--text);font-weight:600">—</span>
+                  · Funding 8h: <span id="regFunding" style="color:var(--text)">—</span></span></div>
+            </div>
+            <div class="indi">
+              <div class="i"><div class="k">ADX</div><div class="v" id="iAdx">—</div></div>
+              <div class="i"><div class="k">EMA 50 / 200</div><div class="v" id="iEma">—</div></div>
+              <div class="i"><div class="k">Precio</div><div class="v" id="iPx">—</div></div>
+              <div class="i"><div class="k">ATR %</div><div class="v" id="iAtr">—</div></div>
+            </div>
+          </div>
         </div>
-        <div class="nav-item" data-panel="trading">
-          <span class="icon">📈</span> Trading
-        </div>
-        <div class="nav-item" data-panel="grid">
-          <span class="icon">🔲</span> Grid
-        </div>
-        <div class="nav-item" data-panel="performance">
-          <span class="icon">💰</span> Rendimiento
-        </div>
-        <div class="nav-item" data-panel="risk">
-          <span class="icon">🛡️</span> Riesgo
-        </div>
-        <div class="nav-item" data-panel="backtest">
-          <span class="icon">🧪</span> Backtest
-        </div>
-        <div class="nav-item" data-panel="config">
-          <span class="icon">⚙️</span> Configuración
-        </div>
-        <div class="nav-item" data-panel="logs">
-          <span class="icon">📝</span> Logs
-        </div>
-        <div class="nav-item" id="btn-logout" style="margin-top:auto;color:var(--red);">
-          <span class="icon">🚪</span> Salir
-        </div>
-      </nav>
 
-      <div class="sidebar-footer">
-        <div style="display:flex; align-items:center; gap:8px; margin-bottom:8px;">
-          <span class="status-led running" id="sidebar-led"></span>
-          <span id="sidebar-status" style="font-size:0.75rem; color:var(--text-secondary);">Conectando...</span>
+        <div class="card">
+          <div class="hd">Posición</div>
+          <div class="bd" id="posBody"><div class="empty">Sin posición abierta</div></div>
         </div>
-        <div style="font-size:0.7rem; color:var(--text-muted);" id="sidebar-uptime">Uptime: --</div>
+
+        <div class="card">
+          <div class="hd">Riesgo · Kill-switch</div>
+          <div class="bd">
+            <div class="halted hidden" id="haltedBox">⛔ <span>BOT DETENIDO (HALTED) — requiere reanudar manualmente</span></div>
+            <div class="gauge">
+              <div class="top"><span>Pérdida diaria</span><span class="v" id="gDayV">—</span></div>
+              <div class="track"><div class="fill" id="gDay" style="width:0%"></div></div>
+            </div>
+            <div class="gauge">
+              <div class="top"><span>Drawdown total</span><span class="v" id="gDdV">—</span></div>
+              <div class="track"><div class="fill" id="gDd" style="width:0%"></div></div>
+            </div>
+            <div class="controls">
+              <button class="btn ok" onclick="control('resume')">Reanudar</button>
+              <button class="btn danger" onclick="control('flatten')">Aplanar</button>
+              <button class="btn danger" onclick="control('stop')">Parar</button>
+            </div>
+          </div>
+        </div>
       </div>
-    </aside>
-
-    <!-- ═══ Main Content ═══ -->
-    <main class="main-content">
-
-      <!-- Header -->
-      <header class="header">
-        <div class="header-left">
-          <button class="btn btn-sm" id="sidebar-toggle" style="display:none;">☰</button>
-          <div class="header-status">
-            <span class="status-led running" id="header-led"></span>
-            <span class="status-text" id="header-status">Conectando</span>
-            <span id="health-bar-text"
-              style="margin-left:8px; font-weight: 500; font-size: 0.85rem; color: var(--text-secondary);">
-              — Calculando portfolio...
-            </span>
-          </div>
-          <span class="connection-badge">
-            <span id="mode-badge">TESTNET</span>
-            <span>|</span>
-            <span id="latency-badge">--ms</span>
-          </span>
-        </div>
-        <div class="header-controls">
-          <button class="btn btn-start btn-sm" id="btn-start">▶ Start</button>
-          <button class="btn btn-pause btn-sm" id="btn-pause">⏸ Pause</button>
-          <button class="btn btn-stop btn-sm" id="btn-stop">⏹ Stop</button>
-          <button class="btn btn-emergency btn-sm" id="btn-emergency">⚠ Emergency</button>
-        </div>
-      </header>
-
-      <!-- ═══ Symbol Selector ═══ -->
-      <div class="symbol-selector" id="symbol-tabs-container">
-        <div class="symbol-tab active" data-symbol="Overview">Overview</div>
-        <!-- Dynamic tabs injected by app.js -->
-      </div>
-
-      <div class="page-content">
-
-        <!-- ═══ 1. OVERVIEW PANEL ═══ -->
-        <div class="panel active" id="panel-overview">
-          <div class="kpi-grid">
-            <div class="kpi-card">
-              <div class="kpi-icon">💼</div>
-              <div class="kpi-label">Capital Trabajando</div>
-              <div class="kpi-value" id="kpi-capital">$--</div>
-              <div class="card-subtitle">Tu balance activo en el bot</div>
-            </div>
-            <div class="kpi-card">
-              <div class="kpi-icon">🌟</div>
-              <div class="kpi-label">Ganancia Total</div>
-              <div class="kpi-value positive" id="kpi-pnl-total">+$0.00</div>
-              <div class="card-subtitle">Beneficios históricos</div>
-            </div>
-            <div class="kpi-card">
-              <div class="kpi-icon">💸</div>
-              <div class="kpi-label">Ganancia de Hoy</div>
-              <div class="kpi-value positive" id="kpi-pnl-24h">+$0.00</div>
-              <div class="card-subtitle">Beneficios en las últimas 24h</div>
-            </div>
-            <div class="kpi-card">
-              <div class="kpi-icon">🛡️</div>
-              <div class="kpi-label">Riesgo / Caída Máxima</div>
-              <div class="kpi-value" id="kpi-drawdown">0.0%</div>
-              <div class="progress-bar">
-                <div class="progress-fill progress-safe" id="drawdown-bar" style="width:0;"></div>
-              </div>
-            </div>
-          </div>
-
-          <!-- 2.3 Per-Pair Mini Cards -->
-          <div id="mini-cards-container" class="stats-grid" style="margin-bottom:var(--space-md);">
-            <!-- Dynamic mini cards injected via app.js -->
-          </div>
-
-          <!-- 2.4 Portfolio Holdings -->
-          <div class="card" id="holdings-card" style="margin-bottom:var(--space-md);">
-            <div class="card-header">
-              <span class="card-title">💼 Portfolio Holdings</span>
-              <span style="font-size:0.75rem;color:var(--text-muted);" id="holdings-updated-at"></span>
-            </div>
-            <div style="overflow-x:auto;">
-              <table id="holdings-table" style="width:100%;border-collapse:collapse;font-size:0.82rem;">
-                <thead>
-                  <tr style="color:var(--text-muted);border-bottom:1px solid rgba(255,255,255,0.07);">
-                    <th style="text-align:left;padding:6px 8px;">Coin</th>
-                    <th style="text-align:right;padding:6px 8px;">Cantidad</th>
-                    <th style="text-align:right;padding:6px 8px;">Coste Medio</th>
-                    <th style="text-align:right;padding:6px 8px;">Precio Actual</th>
-                    <th style="text-align:right;padding:6px 8px;">Valor USDT</th>
-                    <th style="text-align:right;padding:6px 8px;">PnL $</th>
-                    <th style="text-align:right;padding:6px 8px;">PnL %</th>
-                    <th style="text-align:right;padding:6px 8px;">Sell Order</th>
-                  </tr>
-                </thead>
-                <tbody id="holdings-tbody">
-                  <tr><td colspan="8" style="text-align:center;color:var(--text-muted);padding:20px;">Cargando...</td></tr>
-                </tbody>
-              </table>
-            </div>
-            <div id="holdings-footer" style="display:flex;gap:24px;justify-content:flex-end;padding:10px 8px 2px;font-size:0.82rem;border-top:1px solid rgba(255,255,255,0.07);margin-top:8px;flex-wrap:wrap;">
-              <span>USDT Libre: <b id="free-usdt" style="color:var(--text-primary);">—</b></span>
-              <span>Total Equity: <b id="total-equity" style="color:var(--text-primary);">—</b></span>
-              <span>PnL Total: <b id="total-pnl">—</b></span>
-            </div>
-          </div>
-
-          <div class="two-col">
-            <div class="chart-container">
-              <div class="card-header">
-                <span class="card-title">📈 Evolución del Capital</span>
-                <div class="period-selector" id="equity-period-selector">
-                  <button class="period-btn active" data-period="7d">7D</button>
-                  <button class="period-btn" data-period="30d">30D</button>
-                  <button class="period-btn" data-period="90d">90D</button>
-                </div>
-              </div>
-              <div class="chart-wrapper" id="equity-chart"></div>
-            </div>
-
-            <!-- 2.4 Plain-Language Activity Feed -->
-            <div class="card" style="display: flex; flex-direction: column;">
-              <div class="card-header"><span class="card-title">📋 Actividad Reciente</span></div>
-              <div id="activity-feed-container"
-                style="flex:1; overflow-y:auto; max-height:450px; display:flex; flex-direction:column; gap:6px; font-size:0.8rem; color:var(--text-secondary);">
-                <div style="text-align:center; padding:20px;">Esperando actividad...</div>
-              </div>
-            </div>
-          </div>
-        </div>
-
-        <!-- ═══ 2. TRADING PANEL ═══ -->
-        <div class="panel" id="panel-trading">
-          <div class="chart-container">
-            <div class="card-header">
-              <span class="card-title">📈 BTC/USDT Price Chart</span>
-              <div class="period-selector" id="trading-period-selector">
-                <button class="period-btn" data-interval="1">1M</button>
-                <button class="period-btn" data-interval="5">5M</button>
-                <button class="period-btn" data-interval="15">15M</button>
-                <button class="period-btn active" data-interval="60">1H</button>
-                <button class="period-btn" data-interval="240">4H</button>
-              </div>
-            </div>
-            <div class="chart-wrapper" id="price-chart"></div>
-          </div>
-
-          <div class="card" style="margin-top:var(--space-md);">
-            <div class="card-header">
-              <span class="card-title">📋 Historial de Trades</span>
-              <div style="display:flex;gap:8px;">
-                <button class="btn btn-sm btn-primary" id="btn-export-csv">↓ Exportar CSV</button>
-              </div>
-            </div>
-            <div style="max-height:400px; overflow-y:auto;">
-              <table class="data-table">
-                <thead>
-                  <tr>
-                    <th>Fecha</th>
-                    <th>Lado</th>
-                    <th>Precio</th>
-                    <th>Cantidad</th>
-                    <th>Fee</th>
-                    <th>PnL</th>
-                  </tr>
-                </thead>
-                <tbody id="trades-table-body">
-                  <tr>
-                    <td colspan="6" style="text-align:center;color:var(--text-muted)">Cargando trades...</td>
-                  </tr>
-                </tbody>
-              </table>
-            </div>
-          </div>
-        </div>
-
-        <!-- ═══ 3. GRID PANEL (DOM) ═══ -->
-        <div class="panel" id="panel-grid">
-          <div class="two-col">
-            <!-- Left: DOM Ladder -->
-            <div class="card" style="display:flex; flex-direction:column; min-height: 500px;">
-              <div class="card-header">
-                <span class="card-title">🔲 Libro de Órdenes (Grid)</span>
-                <span class="tag tag-buy" id="grid-active-tag">Activo</span>
-              </div>
-              <div id="dom-ladder-container"
-                style="flex:1; display:flex; flex-direction:column; gap:6px; overflow-y:auto; padding-right:8px; margin-top:8px;">
-                <div style="text-align:center;color:var(--text-muted);padding:40px">Cargando libro de órdenes...</div>
-              </div>
-              <!-- Force-close banner: visible only when position_qty > 0 -->
-              <div id="fc-banner" style="display:none; margin-top:10px; padding:10px 14px; background:rgba(239,68,68,0.08); border:1px solid rgba(239,68,68,0.3); border-radius:6px;"></div>
-            </div>
-
-            <!-- Right: Translated Stats & Inventory -->
-            <div>
-              <div class="card" style="margin-bottom:var(--space-md);">
-                <div class="card-header"><span class="card-title">🤖 Visión del Bot</span></div>
-                <div class="stat-item">
-                  <span class="stat-label">Análisis de Mercado</span>
-                  <span class="stat-value tag" id="translated-trend">Calculando...</span>
-                </div>
-                <!-- Plain language summary -->
-                <div
-                  style="font-size:0.85rem; color:var(--text-secondary); margin-top:12px; line-height:1.5; padding:12px; background:rgba(0,0,0,0.2); border-radius:6px; border-left:3px solid var(--blue);"
-                  id="translated-summary">
-                  Recopilando datos de volatilidad y tendencia para este par...
-                </div>
-              </div>
-
-              <div class="card">
-                <div class="card-header"><span class="card-title">💼 Estado de la Red</span></div>
-                <div class="stat-item">
-                  <span class="stat-label">Total Órdenes en Red</span>
-                  <span class="stat-value" id="grid-levels-count">--</span>
-                </div>
-                <div class="stat-item" style="margin-top:8px;">
-                  <span class="stat-label">Esperando Ejecución</span>
-                  <span class="stat-value" id="grid-active-orders">--</span>
-                </div>
-                <div class="stat-item" style="margin-top:8px;">
-                  <span class="stat-label">Distancia entre niveles</span>
-                  <span class="stat-value" id="grid-spacing">--</span>
-                </div>
-                <div style="margin-top:16px; padding-top:16px; border-top:1px solid rgba(255,255,255,0.05);">
-                  <div class="stat-item">
-                    <span class="stat-label">Precio Pivote (Centro)</span>
-                    <span class="stat-value" id="grid-center">--</span>
-                  </div>
-                </div>
-              </div>
-            </div>
-          </div>
-        </div>
-
-        <!-- ═══ 4. PERFORMANCE PANEL ═══ -->
-        <div class="panel" id="panel-performance">
-          <div class="kpi-grid">
-            <div class="kpi-card" title="Número total de operaciones cerradas.">
-              <div class="kpi-label">Operaciones (Trades)</div>
-              <div class="kpi-value" id="perf-total-trades">0</div>
-            </div>
-            <div class="kpi-card" title="Porcentaje de operaciones que han cerrado en ganancias.">
-              <div class="kpi-label">Porcentaje de Acierto</div>
-              <div class="kpi-value positive" id="perf-win-rate">0%</div>
-            </div>
-            <div class="kpi-card" title="Por cada $1 perdido, el bot gana esta cantidad. Mayor a 1.0 es rentable.">
-              <div class="kpi-label">Ratio de Beneficio (Profit Factor)</div>
-              <div class="kpi-value" id="perf-profit-factor">0</div>
-            </div>
-            <div class="kpi-card"
-              title="Mide el rendimiento frente al riesgo. Valores >1.0 son buenos, >2.0 excelentes.">
-              <div class="kpi-label">Calidad del Retorno (Sharpe)</div>
-              <div class="kpi-value" id="perf-sharpe">0</div>
-            </div>
-            <div class="kpi-card" title="Beneficio neto total generado (incluyendo pérdidas y comisiones).">
-              <div class="kpi-label">Beneficio Neto</div>
-              <div class="kpi-value positive" id="perf-net-pnl">$0.00</div>
-            </div>
-            <div class="kpi-card" title="La mayor caída de capital experimentada desde un punto máximo.">
-              <div class="kpi-label">Caída Máxima Histórica</div>
-              <div class="kpi-value" id="perf-max-dd">0%</div>
-            </div>
-          </div>
-
-          <div class="two-col">
-            <div class="chart-container">
-              <div class="card-header">
-                <span class="card-title" title="Beneficios y pérdidas generadas cada día individual">📊 PnL
-                  Diario</span>
-              </div>
-              <div class="chart-wrapper small" id="daily-pnl-chart"></div>
-            </div>
-            <div class="chart-container">
-              <div class="card-header"><span class="card-title"
-                  title="La evolución del valor total de tu cartera a lo largo del tiempo">📈 Evolución del Capital
-                  Neto</span></div>
-              <div class="chart-wrapper small" id="perf-equity-chart"></div>
-            </div>
-          </div>
-
-          <div class="card" style="margin-top:var(--space-md);">
-            <div class="card-header">
-              <span class="card-title">📋 Métricas Detalladas</span>
-              <div class="period-selector" id="perf-period-selector">
-                <button class="period-btn" data-period="24h">24H</button>
-                <button class="period-btn active" data-period="7d">7D</button>
-                <button class="period-btn" data-period="30d">30D</button>
-                <button class="period-btn" data-period="all">Todo</button>
-              </div>
-            </div>
-            <div class="stats-grid" id="perf-detailed-stats"></div>
-          </div>
-        </div>
-
-        <!-- ═══ 5. RISK PANEL ═══ -->
-        <div class="panel" id="panel-risk">
-
-          <!-- 4.2 Alert Center & Emergency Banners -->
-          <div id="risk-alerts-container"
-            style="display:flex; flex-direction:column; gap:8px; margin-bottom:var(--space-md);">
-            <!-- Dynamically injected by app.js -->
-          </div>
-
-          <div class="three-col">
-            <div class="card">
-              <div class="card-header"><span class="card-title">📉 Nivel de Drawdown</span></div>
-              <div class="kpi-value" id="risk-drawdown">0.00%</div>
-              <div class="kpi-label" style="margin-top:var(--space-sm);">Límite de Seguridad: <span
-                  id="risk-dd-limit">15%</span>
-              </div>
-              <div class="progress-bar" style="margin-top:var(--space-md);">
-                <div class="progress-fill progress-safe" id="risk-dd-bar" style="width:0;"></div>
-              </div>
-            </div>
-            <div class="card">
-              <div class="card-header"><span class="card-title">📅 Riesgo Diario</span></div>
-              <div class="kpi-value" id="risk-daily-loss">0.00%</div>
-              <div class="kpi-label" style="margin-top:var(--space-sm);">Límite Max: <span
-                  id="risk-daily-limit">1%</span>
-              </div>
-              <div class="progress-bar" style="margin-top:var(--space-md);">
-                <div class="progress-fill progress-safe" id="risk-daily-bar" style="width:0;"></div>
-              </div>
-            </div>
-            <div class="card">
-              <div class="card-header"><span class="card-title">⚡ Volatilidad Intradiaria (1h)</span></div>
-              <div class="kpi-value" id="risk-price-move">0.00%</div>
-              <div class="kpi-label" style="margin-top:var(--space-sm);">Freno Automático al: <span
-                  id="risk-price-limit">8%</span></div>
-              <div class="progress-bar" style="margin-top:var(--space-md);">
-                <div class="progress-fill progress-safe" id="risk-price-bar" style="width:0;"></div>
-              </div>
-            </div>
-          </div>
-
-          <div class="card" style="margin-top:var(--space-md);">
-            <div class="card-header"><span class="card-title">🚨 Historial Circuit Breakers</span></div>
-            <div style="max-height:300px; overflow-y:auto;">
-              <table class="data-table">
-                <thead>
-                  <tr>
-                    <th>Fecha</th>
-                    <th>Tipo</th>
-                    <th>Valor</th>
-                    <th>Umbral</th>
-                    <th>Acción</th>
-                  </tr>
-                </thead>
-                <tbody id="cb-history-body">
-                  <tr>
-                    <td colspan="5" style="text-align:center;color:var(--text-muted)">Sin eventos</td>
-                  </tr>
-                </tbody>
-              </table>
-            </div>
-          </div>
-        </div>
-
-        <!-- ═══ 6. BACKTEST PANEL ═══ -->
-        <div class="panel" id="panel-backtest">
-          <div class="two-col">
-            <div>
-              <div class="card">
-                <div class="card-header"><span class="card-title">🧪 Configurar Backtest</span></div>
-                <div class="form-group">
-                  <label class="form-label">Meses de datos</label>
-                  <input type="range" id="bt-months" min="1" max="24" value="6">
-                  <span class="stat-value" id="bt-months-val" style="font-size:0.8rem;">6 meses</span>
-                </div>
-                <div class="form-group">
-                  <label class="form-label">Timeframe</label>
-                  <select class="form-select" id="bt-timeframe">
-                    <option value="1h" selected>1 Hora</option>
-                    <option value="4h">4 Horas</option>
-                    <option value="15m">15 Minutos</option>
-                  </select>
-                </div>
-                <div class="form-group">
-                  <label class="form-label">Capital Inicial (USDT)</label>
-                  <input type="number" class="form-input" id="bt-capital" value="150" min="10" max="10000">
-                </div>
-                <div class="form-group">
-                  <label class="form-label">Niveles Grid</label>
-                  <input type="range" id="bt-levels" min="2" max="10" value="5">
-                  <span class="stat-value" id="bt-levels-val" style="font-size:0.8rem;">5</span>
-                </div>
-                <div class="form-group">
-                  <label class="form-label">Walk-Forward Testing</label>
-                  <label class="toggle"><input type="checkbox" id="bt-walkforward"><span
-                      class="toggle-slider"></span></label>
-                </div>
-                <button class="btn btn-primary" id="btn-run-backtest" style="width:100%;margin-top:var(--space-md);">🚀
-                  Ejecutar Backtest</button>
-              </div>
-            </div>
-            <div>
-              <div class="card" id="bt-results-card">
-                <div class="card-header"><span class="card-title">📊 Resultados</span></div>
-                <div id="bt-results">
-                  <div style="text-align:center;color:var(--text-muted);padding:60px 20px;">
-                    Configure y ejecute un backtest para ver resultados
-                  </div>
-                </div>
-              </div>
-            </div>
-          </div>
-
-          <div class="chart-container" id="bt-equity-container" style="margin-top:var(--space-md);display:none;">
-            <div class="card-header"><span class="card-title">📈 Equity Curve (Backtest)</span></div>
-            <div class="chart-wrapper" id="bt-equity-chart"></div>
-          </div>
-        </div>
-
-        <!-- ═══ 7. CONFIG PANEL ═══ -->
-        <div class="panel" id="panel-config">
-          <div class="two-col">
-            <div>
-              <div class="card">
-                <div class="card-header">
-                  <span class="card-title">⚙️ Parámetros del Grid</span>
-                  <button class="btn btn-primary btn-sm" id="btn-save-config">💾 Guardar</button>
-                </div>
-                <div class="form-group">
-                  <label class="form-label">Niveles del Grid</label>
-                  <input type="range" id="cfg-levels" min="2" max="10" value="5">
-                  <span class="stat-value" id="cfg-levels-val" style="font-size:0.8rem;">5</span>
-                </div>
-                <div class="form-group">
-                  <label class="form-label">Spacing Mínimo (%)</label>
-                  <input type="number" class="form-input" id="cfg-spacing" value="0.6" min="0.3" max="5" step="0.1">
-                </div>
-                <div class="form-group">
-                  <label class="form-label">Multiplicador ATR</label>
-                  <input type="number" class="form-input" id="cfg-atr-mult" value="1.5" min="0.5" max="5" step="0.1">
-                </div>
-                <div class="form-group">
-                  <label class="form-label">Tamaño Orden (USDT)</label>
-                  <input type="number" class="form-input" id="cfg-order-size" value="25" min="5" max="500" step="5">
-                </div>
-                <div class="form-group">
-                  <label class="form-label">Umbral ADX</label>
-                  <input type="number" class="form-input" id="cfg-adx-threshold" value="25" min="15" max="50">
-                </div>
-                <div class="form-group">
-                  <label class="form-label">Max Drawdown (%)</label>
-                  <input type="number" class="form-input" id="cfg-max-dd" value="15" min="5" max="50">
-                </div>
-                <div class="form-group">
-                  <label class="form-label">Max Pérdida Diaria (%)</label>
-                  <input type="number" class="form-input" id="cfg-max-daily" value="1" min="0.5" max="10" step="0.5">
-                </div>
-              </div>
-            </div>
-            <div>
-              <div class="card" style="margin-bottom:var(--space-md);">
-                <div class="card-header"><span class="card-title">👁️ Vista Previa Grid</span></div>
-                <div id="config-grid-preview">
-                  <div style="text-align:center;color:var(--text-muted);padding:40px;">Ajuste parámetros para ver vista
-                    previa</div>
-                </div>
-              </div>
-              <div class="card">
-                <div class="card-header"><span class="card-title">📜 Historial Cambios</span></div>
-                <div id="config-history"
-                  style="max-height:200px;overflow-y:auto;font-size:0.75rem;color:var(--text-muted);">
-                  Cargando...
-                </div>
-              </div>
-            </div>
-          </div>
-        </div>
-
-        <!-- ═══ 8. LOGS PANEL ═══ -->
-        <div class="panel" id="panel-logs">
-          <div class="card">
-            <div class="card-header">
-              <span class="card-title">📝 Event Logs</span>
-              <div style="display:flex; gap:8px; align-items:center;">
-                <select class="form-select" id="log-filter-level" style="width:120px;">
-                  <option value="">Todos</option>
-                  <option value="info">Info</option>
-                  <option value="warning">Warning</option>
-                  <option value="error">Error</option>
-                  <option value="critical">Critical</option>
-                </select>
-                <input type="text" class="form-input" id="log-search" placeholder="Buscar..." style="width:200px;">
-                <button class="btn btn-sm btn-primary" id="btn-refresh-logs">↻ Actualizar</button>
-              </div>
-            </div>
-            <div class="log-terminal" id="log-terminal">
-              <div class="log-entry info">
-                <span class="timestamp">--:--:--</span>
-                <span class="level">INFO</span>
-                <span class="module">system</span>
-                Esperando conexión...
-              </div>
-            </div>
-          </div>
-        </div>
-
-      </div><!-- page-content -->
-    </main>
-  </div><!-- app-layout -->
-
-  <!-- ═══ Login Modal ═══ -->
-  <div id="login-modal"
-    style="position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(0,0,0,0.9);z-index:1000;display:flex;align-items:center;justify-content:center;">
-    <div class="card" style="width:380px;max-width:90vw;">
-      <div style="text-align:center;margin-bottom:var(--space-xl);">
-        <div style="font-size:3rem;margin-bottom:var(--space-md);">🤖</div>
-        <h2
-          style="font-size:1.3rem;font-weight:700;background:linear-gradient(135deg,var(--blue),var(--purple));background-clip:text;-webkit-background-clip:text;-webkit-text-fill-color:transparent;">
-          GridBot Dashboard</h2>
-        <p style="color:var(--text-muted);font-size:0.85rem;margin-top:4px;">Ingrese sus credenciales</p>
-      </div>
-      <div class="form-group">
-        <label class="form-label">Usuario</label>
-        <input type="text" class="form-input" id="login-user" value="admin" autocomplete="username">
-      </div>
-      <div class="form-group">
-        <label class="form-label">Contraseña</label>
-        <input type="password" class="form-input" id="login-pass" placeholder="••••••••"
-          autocomplete="current-password">
-      </div>
-      <button class="btn btn-primary" id="btn-login" style="width:100%;padding:12px;font-size:0.9rem;">Iniciar
-        Sesión</button>
-      <div id="login-error"
-        style="color:var(--red);font-size:0.8rem;text-align:center;margin-top:var(--space-sm);display:none;">
-        Credenciales inválidas</div>
     </div>
   </div>
+</div>
 
-  <script src="/js/app.js"></script>
+<div class="toast" id="toast"></div>
+
+<script>
+let token = localStorage.getItem('jwt') || '';
+let timer = null;
+
+const $ = id => document.getElementById(id);
+const fmtUsd = v => (v==null||isNaN(v))?'—':'$'+Number(v).toLocaleString('en-US',{minimumFractionDigits:2,maximumFractionDigits:2});
+const signedUsd = v => (v==null||isNaN(v))?'—':(v>=0?'+':'−')+'$'+Math.abs(Number(v)).toLocaleString('en-US',{minimumFractionDigits:2,maximumFractionDigits:2});
+const fmtNum = (v,d=4) => (v==null||isNaN(v))?'—':Number(v).toFixed(d);
+const cls = v => v>0?'pos':(v<0?'neg':'');
+function toast(m){const t=$('toast');t.textContent=m;t.classList.add('show');setTimeout(()=>t.classList.remove('show'),2600);}
+
+async function api(path, opts={}){
+  const r = await fetch(path, {...opts, headers:{'Content-Type':'application/json',
+    ...(token?{'Authorization':'Bearer '+token}:{}), ...(opts.headers||{})}});
+  if(r.status===401){logout();throw new Error('unauth');}
+  if(!r.ok) throw new Error('http '+r.status);
+  return r.json();
+}
+
+async function doLogin(e){
+  e.preventDefault(); $('loginErr').textContent='';
+  try{
+    const r = await fetch('/api/auth/login',{method:'POST',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({username:$('u').value,password:$('p').value})});
+    if(!r.ok){const d=await r.json().catch(()=>({}));throw new Error(d.detail||'Credenciales inválidas');}
+    const d = await r.json(); token=d.access_token; localStorage.setItem('jwt',token);
+    showApp();
+  }catch(err){ $('loginErr').textContent = err.message; }
+}
+function showApp(){ $('login').classList.add('hidden'); $('app').classList.remove('hidden'); start(); }
+function logout(){ token=''; localStorage.removeItem('jwt'); if(timer)clearInterval(timer);
+  $('app').classList.add('hidden'); $('login').classList.remove('hidden'); }
+
+async function control(action){
+  const labels={resume:'reanudar',flatten:'APLANAR (cerrar todo)',stop:'PARAR el bot'};
+  if(!confirm('¿Confirmar: '+labels[action]+'?')) return;
+  try{ await api('/api/futures/control',{method:'POST',body:JSON.stringify({action})});
+    toast('Comando enviado: '+action); setTimeout(refresh,800);
+  }catch(e){ toast('Error al enviar comando'); }
+}
+
+const REGIME={
+  ranging:{i:'≈',c:'var(--violet)',n:'RANGO',d:'Mercado lateral — grid neutral'},
+  trending_up:{i:'↑',c:'var(--green)',n:'TENDENCIA ↑',d:'Alcista — posición larga'},
+  trending_down:{i:'↓',c:'var(--red)',n:'TENDENCIA ↓',d:'Bajista — posición corta'},
+  transitional:{i:'~',c:'var(--amber)',n:'TRANSICIONAL',d:'Ambiguo — fuera del mercado'}
+};
+const MODE={trend:'Tendencia',grid:'Grid',flat:'Plano'};
+
+function renderOverview(o){
+  const st=o.state||{}, risk=o.risk||{}, bot=o.bot||{}, stats=o.stats||{};
+  const ind=st.indicators||{}, pos=st.position||null;
+
+  $('sym').textContent = st.symbol || '—';
+  const status=(bot.status||'—').toLowerCase();
+  $('botStatus').textContent = status.toUpperCase();
+  $('botDot').className='dot '+(risk.halted?'off':(status==='running'?'on':(status==='paused'?'warn':'off')));
+  if(st.mode){const mp=$('modePill');mp.style.display='';mp.innerHTML='<span class="dot on"></span>'+(MODE[st.mode]||st.mode);}
+
+  $('kEquity').textContent = fmtUsd(st.equity);
+  $('kEquitySub').textContent = 'Pico '+fmtUsd(st.peak_equity||st.equity)+' · Libre '+fmtUsd(st.free);
+  const pnl = (stats.total_pnl!=null)?stats.total_pnl:((stats.gross_profit||0)-(stats.gross_loss||0));
+  $('kPnl').textContent=signedUsd(pnl); $('kPnl').className='val mono '+cls(pnl);
+  const wr=(stats.win_rate!=null)?Number(stats.win_rate):null;
+  $('kWin').textContent = wr==null?'—':wr.toFixed(1)+'%';
+  $('kWinSub').textContent=(stats.total_trades||0)+' operaciones';
+  const pf=(stats.profit_factor!=null)?stats.profit_factor:null;
+  $('kPf').textContent = (pf==null||!isFinite(pf))?'—':Number(pf).toFixed(2);
+  $('kPfSub').textContent = pf!=null?(pf>=1.5?'saludable':(pf>=1?'positivo':'negativo')):'—';
+
+  const r=REGIME[st.regime]||REGIME.transitional;
+  $('regBadge').textContent=r.i; $('regBadge').style.color=r.c; $('regBadge').style.borderColor=r.c;
+  $('regName').textContent=r.n; $('regName').style.color=r.c; $('regDesc').textContent=r.d;
+  $('regMode').textContent=MODE[st.mode]||'—';
+  const fr=st.funding_rate;
+  $('regFunding').textContent=(fr!=null&&!isNaN(fr))?(fr*100).toFixed(4)+'%':'—';
+  $('regFunding').className=(fr>0?'neg':(fr<0?'pos':''));  // longs pay when positive
+  $('iAdx').textContent=fmtNum(ind.adx,1);
+  const up=ind.ema_fast>ind.ema_slow, dn=ind.ema_fast<ind.ema_slow;
+  $('iEma').textContent=(ind.ema_fast!=null)?(up?'↑ alcista':(dn?'↓ bajista':'—')):'—';
+  $('iEma').className='v '+(up?'pos':(dn?'neg':''));
+  $('iPx').textContent=fmtNum(ind.price,2);
+  $('iAtr').textContent=(ind.atr_pct!=null)?(ind.atr_pct*100).toFixed(2)+'%':'—';
+
+  renderPosition(pos, st.trend_stop);
+  renderGauge('gDay','gDayV', risk.daily_loss_pct, risk.max_daily_loss_pct);
+  renderGauge('gDd','gDdV', risk.drawdown_pct, risk.max_total_drawdown_pct);
+  $('haltedBox').classList.toggle('hidden', !risk.halted);
+}
+
+function renderPosition(pos, stop){
+  const b=$('posBody');
+  if(!pos || pos.side==='flat' || !pos.size){ b.innerHTML='<div class="empty">Sin posición abierta</div>'; return; }
+  const long=pos.side==='long'; const up=Number(pos.uPnL||0);
+  b.innerHTML=`
+    <div style="margin-bottom:14px"><span class="sidetag ${long?'long':'short'}">${long?'▲ LARGO':'▼ CORTO'}</span>
+      <span class="mono ${cls(up)}" style="float:right;font-size:18px;font-weight:700">${signedUsd(up)}</span></div>
+    <div class="pgrid">
+      <div class="row"><span class="k">Tamaño</span><span class="v">${fmtNum(pos.size,4)}</span></div>
+      <div class="row"><span class="k">Apalanc.</span><span class="v">${fmtNum(pos.leverage,0)}x</span></div>
+      <div class="row"><span class="k">Entrada</span><span class="v">${fmtNum(pos.entry,2)}</span></div>
+      <div class="row"><span class="k">Marca</span><span class="v">${fmtNum(pos.mark,2)}</span></div>
+      <div class="row"><span class="k">Liquidación</span><span class="v neg">${fmtNum(pos.liq,2)}</span></div>
+      <div class="row"><span class="k">Stop (Chandelier)</span><span class="v">${stop?fmtNum(stop,2):'—'}</span></div>
+    </div>`;
+}
+
+function renderGauge(fillId,valId,val,limit){
+  const v=Math.max(0,Number(val||0)), lim=Number(limit||1);
+  const pct=Math.min(100,(v/lim)*100);
+  const f=$(fillId); f.style.width=pct+'%';
+  f.style.background = pct>=85?'var(--red)':(pct>=55?'var(--amber)':'var(--green)');
+  $(valId).textContent = v.toFixed(2)+'% / '+lim.toFixed(1)+'%';
+}
+
+function renderTrades(rows){
+  const tb=$('trades');
+  if(!rows||!rows.length){ tb.innerHTML='<tr><td colspan="6" class="empty">Sin operaciones todavía</td></tr>'; return; }
+  tb.innerHTML = rows.map(t=>{
+    const side=(t.side||'').toLowerCase().includes('buy')?'buy':'sell';
+    const pnl=Number(t.pnl||0);
+    const meta=(t.metadata_json&&t.metadata_json.reason)||(t.metadata&&t.metadata.reason)||'';
+    const time=(t.timestamp||'').slice(11,19)||'—';
+    return `<tr><td class="mut">${time}</td><td><span class="tag ${side}">${side.toUpperCase()}</span></td>
+      <td>${fmtNum(t.price,2)}</td><td>${fmtNum(t.qty,4)}</td>
+      <td class="${cls(pnl)}">${pnl?signedUsd(pnl):'—'}</td><td class="mut">${meta}</td></tr>`;
+  }).join('');
+}
+
+let lastEq=[];
+function renderEquity(points){
+  lastEq = (points||[]).map(p=>({v:Number(p.capital ?? p.equity ?? 0)})).filter(p=>p.v>0);
+  drawEquity();
+  if(lastEq.length){
+    const vals=lastEq.map(p=>p.v), peak=Math.max(...vals), min=Math.min(...vals), cur=vals[vals.length-1];
+    $('eqPeak').textContent=fmtUsd(peak); $('eqMin').textContent=fmtUsd(min);
+    const dd=peak>0?((peak-cur)/peak*100):0;
+    $('eqDd').textContent=dd.toFixed(2)+'%'; $('eqDd').className='mono '+(dd>0.01?'neg':'');
+    $('eqRange').textContent=lastEq.length+' puntos';
+  }
+}
+function drawEquity(){
+  const c=$('eqChart'); if(!c)return; const ctx=c.getContext('2d');
+  const dpr=window.devicePixelRatio||1, w=c.clientWidth, h=c.clientHeight;
+  c.width=w*dpr; c.height=h*dpr; ctx.setTransform(dpr,0,0,dpr,0,0); ctx.clearRect(0,0,w,h);
+  const vals=lastEq.map(p=>p.v); if(vals.length<2)return;
+  let mn=Math.min(...vals), mx=Math.max(...vals); if(mn===mx){mn-=1;mx+=1;}
+  const pad=10, X=i=>pad+(i/(vals.length-1))*(w-2*pad), Y=v=>h-pad-((v-mn)/(mx-mn))*(h-2*pad);
+  ctx.strokeStyle='rgba(36,48,73,.5)'; ctx.lineWidth=1;
+  for(let g=0;g<=3;g++){const y=pad+g/3*(h-2*pad);ctx.beginPath();ctx.moveTo(pad,y);ctx.lineTo(w-pad,y);ctx.stroke();}
+  const rising=vals[vals.length-1]>=vals[0], color=rising?'#22c55e':'#ef4444';
+  ctx.beginPath(); ctx.moveTo(X(0),Y(vals[0])); vals.forEach((v,i)=>ctx.lineTo(X(i),Y(v)));
+  ctx.lineTo(X(vals.length-1),h-pad); ctx.lineTo(X(0),h-pad); ctx.closePath();
+  const grad=ctx.createLinearGradient(0,0,0,h);
+  grad.addColorStop(0, rising?'rgba(34,197,94,.22)':'rgba(239,68,68,.22)'); grad.addColorStop(1,'rgba(0,0,0,0)');
+  ctx.fillStyle=grad; ctx.fill();
+  ctx.beginPath(); ctx.moveTo(X(0),Y(vals[0])); vals.forEach((v,i)=>ctx.lineTo(X(i),Y(v)));
+  ctx.strokeStyle=color; ctx.lineWidth=2; ctx.lineJoin='round'; ctx.stroke();
+  ctx.beginPath(); ctx.arc(X(vals.length-1),Y(vals[vals.length-1]),3.5,0,7); ctx.fillStyle=color; ctx.fill();
+}
+window.addEventListener('resize',drawEquity);
+
+function setConn(ok){
+  $('connDot').className='dot '+(ok?'on':'off');
+  $('connTxt').textContent = ok?'en vivo':'sin conexión';
+  if(ok) $('updTime').textContent='· '+new Date().toLocaleTimeString('es-ES');
+}
+async function refresh(){
+  try{
+    const [ov,eq,tr]=await Promise.all([
+      api('/api/futures/overview'), api('/api/futures/equity?limit=300'), api('/api/futures/trades?limit=30')]);
+    renderOverview(ov); renderEquity(eq.points); renderTrades(tr.trades); setConn(true);
+  }catch(e){ if(e.message!=='unauth') setConn(false); }
+}
+function start(){ refresh(); if(timer)clearInterval(timer); timer=setInterval(refresh,3000); }
+
+if(token) showApp();
+</script>
 </body>
-
 </html>

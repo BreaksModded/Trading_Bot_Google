@@ -6,6 +6,7 @@ Provides JWT-based authentication and in-memory rate limiting for the dashboard 
 
 from __future__ import annotations
 
+import secrets
 import time
 from collections import defaultdict, deque
 from datetime import datetime, timedelta
@@ -142,12 +143,36 @@ def verify_token(
 
 @auth_router.post("/auth/login", response_model=TokenResponse)
 async def login(body: LoginRequest, request: Request):
-    """Authenticate and receive a JWT token."""
+    """Authenticate and receive a JWT token.
+
+    Verifies against a bcrypt hash (DASHBOARD_PASSWORD_HASH) when configured;
+    otherwise falls back to a constant-time plaintext compare and refuses the
+    insecure default password outright.
+    """
     settings = _get_settings(request)
     valid_user = settings.dashboard.username if settings else "admin"
-    valid_pass = settings.dashboard.password if settings else "changeme"
+    pw_hash = settings.dashboard.password_hash if settings else ""
+    plain = settings.dashboard.password if settings else "changeme"
 
-    if body.username != valid_user or body.password != valid_pass:
+    user_ok = secrets.compare_digest(body.username, valid_user)
+    if pw_hash:
+        try:
+            pass_ok = pwd_context.verify(body.password, pw_hash)
+        except Exception:
+            pass_ok = False
+    elif plain in ("", "changeme"):
+        logger.error(
+            "Login blocked: dashboard password not configured securely "
+            "(set DASHBOARD_PASSWORD_HASH or a non-default DASHBOARD_PASSWORD)."
+        )
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Dashboard password not configured securely",
+        )
+    else:
+        pass_ok = secrets.compare_digest(body.password, plain)
+
+    if not (user_ok and pass_ok):
         logger.warning(f"Failed login attempt: {body.username}")
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,

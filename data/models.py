@@ -58,6 +58,43 @@ class TrendBias(StrEnum):
     NEUTRAL = "neutral"
 
 
+class PositionSide(StrEnum):
+    """Net futures position direction (one-way mode)."""
+
+    LONG = "long"
+    SHORT = "short"
+    FLAT = "flat"
+
+
+# ── Futures Models ────────────────────────────────────────────────────
+
+
+@dataclass(slots=True)
+class FuturesPosition:
+    """Live futures position snapshot from the exchange (the source of truth).
+
+    Replaces the spot bot's reconstructed _position_qty / _avg_cost. For
+    futures we always read the authoritative position from get_positions(),
+    which eliminates the desync that caused thousands of balance errors.
+    """
+
+    symbol: str
+    side: str  # PositionSide value: "long" | "short" | "flat"
+    size: float  # contract qty in base units; 0 = flat
+    entry_price: float
+    mark_price: float
+    liq_price: float
+    leverage: float
+    unrealized_pnl: float
+    position_value: float
+    margin: float
+    updated_at: datetime
+
+    @property
+    def is_flat(self) -> bool:
+        return self.size <= 0.0 or self.side == PositionSide.FLAT
+
+
 # ── Trade Models ──────────────────────────────────────────────────────
 
 
