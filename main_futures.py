@@ -29,9 +29,7 @@ from core.grid import build_grid_plan, validate_grid
 from core.indicators import compute_chandelier_exit, enrich_indicators
 from core.position_manager import FuturesPositionManager
 from core.regime import MarketRegime, classify_futures_regime
-from core.trend import (
-    TrendStop, compute_fixed_fractional_qty, evaluate_trend_entry, initial_trend_stop,
-)
+from core.trend import TrendStop, decide_trend
 from data.database import Database
 from data.models import BotStatus, EventLogRecord, TradeRecord
 from services.health_monitor import HealthMonitor
@@ -214,9 +212,6 @@ class FuturesBot:
     # ── Regime handlers ───────────────────────────────────────────────
 
     async def _handle_trend(self, regime, regime_htf, ind, live_price, position, equity, free) -> None:
-        desired_side = "Buy" if regime == MarketRegime.TRENDING_UP else "Sell"
-        desired_pos = "long" if desired_side == "Buy" else "short"
-
         if position.is_flat:
             now = datetime.now(UTC)
             if self._entry_cooldown_until and now < self._entry_cooldown_until:
@@ -224,29 +219,23 @@ class FuturesBot:
             if self.pm.has_open_orders():  # clear any grid first
                 await self.pm.cancel_all()
                 self.pm.reset()
-            entry = evaluate_trend_entry(
-                regime=regime, higher_tf_regime=regime_htf,
-                require_htf=self.s.require_higher_tf_confirmation,
-            )
-            if entry.side is None:
-                self.mode = "flat"
-                return
-            stop = initial_trend_stop(
-                entry.side, chandelier_long=ind["chandelier_long"],
-                chandelier_short=ind["chandelier_short"],
-            )
-            qty = compute_fixed_fractional_qty(
-                equity=equity, risk_pct=self.s.risk_per_trade_pct, entry_price=live_price,
-                stop_price=stop.stop_price, qty_step=self.rules.qty_step,
-                min_qty=self.rules.min_qty, available_margin=free, leverage=self.s.leverage,
-            )
-            if qty <= 0:
-                logger.info("trend entry skipped — qty below viable minimum")
-                self.mode = "flat"
-                return
+
+        prev_stop = self.trend_stop.stop_price if self.trend_stop else None
+        decision = decide_trend(
+            regime=regime, regime_htf=regime_htf, position_side=position.side,
+            position_flat=position.is_flat, chandelier_long=ind["chandelier_long"],
+            chandelier_short=ind["chandelier_short"], live_price=live_price,
+            equity=equity, available_margin=free, trend_stop=self.trend_stop,
+            risk_pct=self.s.risk_per_trade_pct, leverage=self.s.leverage,
+            require_htf=self.s.require_higher_tf_confirmation,
+            qty_step=self.rules.qty_step, min_qty=self.rules.min_qty,
+        )
+
+        if decision.action == "enter":
+            now = datetime.now(UTC)
             try:
                 await self.exchange.place_market_linear(
-                    symbol=self.symbol, side=entry.side, qty=qty, reduce_only=False,
+                    symbol=self.symbol, side=decision.side, qty=decision.qty, reduce_only=False,
                 )
             except Exception as exc:
                 self._entry_cooldown_until = now + timedelta(seconds=self._entry_cooldown_s)
@@ -254,42 +243,29 @@ class FuturesBot:
                                 f"entry failed (cooldown {self._entry_cooldown_s}s): {exc}")
                 self.mode = "flat"
                 return
-            # Confirm the position actually opened before committing to trend mode.
-            opened = await self.pm.get_position()
+            opened = await self.pm.get_position()  # confirm it actually opened
             if opened.is_flat:
                 self._entry_cooldown_until = now + timedelta(seconds=self._entry_cooldown_s)
                 await self._log("WARNING", "trend",
                                 "entry order placed but no position detected — cooldown")
                 self.mode = "flat"
                 return
-            self.trend_stop = stop
+            self.trend_stop = decision.stop
             self.mode = "trend"
-            await self._set_exchange_sl(stop.stop_price)  # exchange-side crash backstop
+            await self._set_exchange_sl(decision.stop.stop_price)  # exchange-side backstop
             await self._log("INFO", "trend",
-                            f"ENTER {entry.side} {opened.size} @ ~{live_price:.2f} "
-                            f"stop={stop.stop_price:.2f} risk={self.s.risk_per_trade_pct:.1%}")
-            return
-
-        # We hold a position.
-        if position.side != desired_pos:
-            await self._close_position(position, "trend_reversal")
-            return
-        if self.trend_stop is None or self.trend_stop.side != desired_side:
-            self.trend_stop = initial_trend_stop(
-                desired_side, chandelier_long=ind["chandelier_long"],
-                chandelier_short=ind["chandelier_short"],
-            )
-        prev_stop = self.trend_stop.stop_price
-        new_stop = self.trend_stop.update(
-            chandelier_long=ind["chandelier_long"], chandelier_short=ind["chandelier_short"],
-        )
-        self.mode = "trend"
-        # Ratchet the exchange-side stop only when it moves materially (>0.2%).
-        if abs(new_stop - prev_stop) / max(prev_stop, 1e-9) > 0.002:
-            await self._set_exchange_sl(new_stop)
-        # Software stop on the LIVE price (responsive, not the closed-candle close).
-        if self.trend_stop.is_hit(live_price):
-            await self._close_position(position, "chandelier_stop")
+                            f"ENTER {decision.side} {opened.size} @ ~{live_price:.2f} "
+                            f"stop={decision.stop.stop_price:.2f} risk={self.s.risk_per_trade_pct:.1%}")
+        elif decision.action == "close":
+            await self._close_position(position, decision.reason)
+        elif decision.action == "hold":
+            self.trend_stop = decision.stop
+            self.mode = "trend"
+            # Ratchet the exchange-side stop only when it moves materially (>0.2%).
+            if prev_stop is not None and abs(decision.stop.stop_price - prev_stop) / max(prev_stop, 1e-9) > 0.002:
+                await self._set_exchange_sl(decision.stop.stop_price)
+        else:  # "none"
+            self.mode = "flat"
 
     async def _handle_range(self, ind, price, live_price, position, free) -> None:
         if not position.is_flat:  # close a leftover trend position before gridding

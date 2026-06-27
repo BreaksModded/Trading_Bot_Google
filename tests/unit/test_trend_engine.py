@@ -8,8 +8,46 @@ import pytest
 
 from core.regime import MarketRegime
 from core.trend import (
-    TrendStop, compute_fixed_fractional_qty, evaluate_trend_entry, initial_trend_stop,
+    TrendStop, compute_fixed_fractional_qty, decide_trend, evaluate_trend_entry,
+    initial_trend_stop,
 )
+
+
+def _decide(**kw):
+    base = dict(
+        regime=MarketRegime.TRENDING_UP, regime_htf=MarketRegime.TRENDING_UP,
+        position_side="flat", position_flat=True, chandelier_long=1950.0,
+        chandelier_short=2050.0, live_price=2000.0, equity=150.0, available_margin=150.0,
+        trend_stop=None, risk_pct=0.015, leverage=5, require_htf=True,
+        qty_step=Decimal("0.001"), min_qty=Decimal("0.001"),
+    )
+    base.update(kw)
+    return decide_trend(**base)
+
+
+def test_decide_enters_long_in_uptrend():
+    d = _decide()
+    assert d.action == "enter" and d.side == "Buy" and d.qty > 0 and d.stop is not None
+
+
+def test_decide_none_on_htf_conflict():
+    assert _decide(regime_htf=MarketRegime.TRENDING_DOWN).action == "none"
+
+
+def test_decide_close_on_reversal():
+    d = _decide(position_flat=False, position_side="long",
+                regime=MarketRegime.TRENDING_DOWN, regime_htf=MarketRegime.TRENDING_DOWN)
+    assert d.action == "close" and d.reason == "trend_reversal"
+
+
+def test_decide_close_on_stop_hit():
+    d = _decide(position_flat=False, position_side="long", live_price=1940.0)
+    assert d.action == "close" and d.reason == "chandelier_stop"
+
+
+def test_decide_hold_above_stop():
+    d = _decide(position_flat=False, position_side="long", live_price=2000.0)
+    assert d.action == "hold" and d.stop.stop_price == 1950.0
 
 
 # ── Entry ─────────────────────────────────────────────────────────────
