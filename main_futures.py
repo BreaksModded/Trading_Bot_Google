@@ -170,8 +170,10 @@ class FuturesBot:
             pos = await self.pm.get_position()
             if self.mode != "flat" or not pos.is_flat or self.pm.has_open_orders():
                 await self._flatten_all("kill_switch")
+                pos = await self.pm.get_position()  # re-read post-flatten → reflects flat
             self._maybe_log_kill_switch(decision, equity)
             self.db.update_bot_state(status=BotStatus.PAUSED, message=decision.reason)
+            self._persist_halted_state(equity, free, pos)
             logger.warning("[it {}] HALTED — {} (manual resume required)", it, decision.reason)
             return
 
@@ -509,6 +511,46 @@ class FuturesBot:
             self.db.set_runtime_config("futures_state", blob)
         except Exception as exc:
             logger.debug("persist state failed: {}", exc)
+
+    def _persist_halted_state(self, equity, free, position) -> None:
+        """Keep futures_state fresh while HALTED.
+
+        The cycle returns before _persist_state when halted, which would freeze the
+        whole blob (stale updated_at -> "sin datos"; stale position -> phantom). Instead
+        of overwriting with a minimal blob (which would blank indicators/regime/timeline),
+        READ the last persisted blob and OVERLAY only what must stay coherent: a fresh
+        updated_at, the real (now flat) position, and trend_stop=None. indicators / regime
+        / regime_history / mode are left intact (last known). Equity-curve point is still
+        recorded (throttled) so there is no gap. Read/persist layer only — the halt
+        decision was already taken by the risk manager; nothing here changes it.
+        """
+        try:
+            now = datetime.now(UTC)
+            if self._last_equity_ts is None or (now - self._last_equity_ts).total_seconds() >= 60:
+                self.db.record_equity(capital=equity, drawdown_pct=self.risk._last_drawdown)
+                self._last_equity_ts = now
+            blob = self.db.get_runtime_config("futures_state")
+            if not isinstance(blob, dict) or not blob:
+                # Booted already halted (no prior state): write a minimal coherent blob.
+                blob = {
+                    "mode": self.mode, "regime": self._last_regime, "regime_htf": None,
+                    "regime_history": list(self._regime_history), "symbol": self.symbol,
+                    "leverage": self.s.leverage, "equity": equity, "free": free,
+                    "peak_equity": self.risk.peak_equity, "funding_rate": self._funding_rate,
+                }
+            blob["updated_at"] = now.isoformat()
+            blob["equity"] = equity   # refresh: equity can drift (funding/fees) even flat
+            blob["free"] = free
+            blob["trend_stop"] = None
+            blob["position"] = {
+                "side": position.side, "size": position.size,
+                "entry": position.entry_price, "mark": position.mark_price,
+                "liq": position.liq_price, "uPnL": position.unrealized_pnl,
+                "leverage": position.leverage, "margin": position.margin,
+            }
+            self.db.set_runtime_config("futures_state", blob)
+        except Exception as exc:
+            logger.debug("persist halted state failed: {}", exc)
 
     async def _process_commands(self) -> None:
         try:
