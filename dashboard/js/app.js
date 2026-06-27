@@ -356,7 +356,7 @@ function renderRecent() {
       <td class="r mono">${money(t.price, priceDp(t.price))}</td>
       <td class="r mono">${num(t.qty, 4)}</td>
       <td class="r mono ${pnlClass(t.pnl)}">${signedMoney(t.pnl)}</td>
-      <td>${m.reason || '—'}</td></tr>`;
+      <td>${escapeHtml(m.reason || '—')}</td></tr>`;
   }).join('');
 }
 
@@ -400,8 +400,8 @@ function renderOperaciones() {
       <td class="r mono">${money(notional)}</td>
       <td class="r mono ${pnlClass(t.pnl)}">${signedMoney(t.pnl)}</td>
       <td class="r mono ${pnlClass(t.pnl)}">${roe == null ? '—' : signedPct(roe)}</td>
-      <td>${m.reason || '—'}</td>
-      <td><span class="reg-dot"><span class="d" style="background:${rc}"></span>${rl}</span></td></tr>`;
+      <td>${escapeHtml(m.reason || '—')}</td>
+      <td><span class="reg-dot"><span class="d" style="background:${rc}"></span>${escapeHtml(rl)}</span></td></tr>`;
   }).join('');
 }
 function exportCSV() {
@@ -456,10 +456,10 @@ async function loadCircuitBreakers() {
       const bt = e.breaker_type === 'max_daily_loss' ? 'Pérdida diaria' : (e.breaker_type === 'max_total_drawdown' ? 'Drawdown total' : e.breaker_type);
       return `<tr>
         <td class="mono">${dateHM(e.timestamp)}</td>
-        <td>${bt}</td>
+        <td>${escapeHtml(bt)}</td>
         <td class="r mono neg">${pct((e.trigger_value || 0) * 100, 2)}</td>
         <td class="r mono">${pct((e.threshold || 0) * 100, 2)}</td>
-        <td class="mono">${e.action_taken || '—'}</td></tr>`;
+        <td class="mono">${escapeHtml(e.action_taken || '—')}</td></tr>`;
     }).join('');
   } catch (e) {}
 }
@@ -478,8 +478,8 @@ async function loadLogs() {
       const lv = String(e.level || 'INFO').toUpperCase();
       return `<div class="ln">
         <span class="t">${timeHM(e.timestamp)}</span>
-        <span class="lv lv-${lv.toLowerCase()}">${lv}</span>
-        <span class="md">${e.module || ''}</span>
+        <span class="lv lv-${lv.toLowerCase()}">${escapeHtml(lv)}</span>
+        <span class="md">${escapeHtml(e.module || '')}</span>
         <span class="ms">${escapeHtml(e.message || '')}</span></div>`;
     }).join('');
   } catch (e) { term.innerHTML = '<div class="ln"><span class="ms muted">No se pudieron cargar los eventos.</span></div>'; }
