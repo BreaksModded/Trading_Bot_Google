@@ -547,6 +547,8 @@ class FuturesBot:
             if self.mode == "grid":  # grid flips: place the partner on each fill
                 trade = await self.pm.handle_fill(ev)
                 if trade:
+                    # Stamp the regime the grid fill happened under (read-only label).
+                    trade.metadata = {**(trade.metadata or {}), "regime": self._last_regime}
                     await asyncio.to_thread(self.db.insert_trade, trade)
 
     async def _log(self, level: str, module: str, message: str) -> None:
