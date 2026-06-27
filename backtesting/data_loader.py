@@ -154,19 +154,31 @@ def download_funding_history(
 
 
 def save_cache(df: pd.DataFrame, name: str) -> Path:
-    """Save DataFrame to local cache as parquet."""
+    """Save DataFrame to local cache (parquet if available, else pickle)."""
     CACHE_DIR.mkdir(parents=True, exist_ok=True)
-    path = CACHE_DIR / f"{name}.parquet"
-    df.to_parquet(path, index=False)
+    try:
+        path = CACHE_DIR / f"{name}.parquet"
+        df.to_parquet(path, index=False)
+    except Exception:  # pyarrow/fastparquet not installed -> fall back to pickle
+        path = CACHE_DIR / f"{name}.pkl"
+        df.to_pickle(path)
     logger.info(f"Cached {len(df)} rows to {path}")
     return path
 
 
 def load_cache(name: str) -> Optional[pd.DataFrame]:
-    """Load DataFrame from local cache."""
-    path = CACHE_DIR / f"{name}.parquet"
-    if path.exists():
-        df = pd.read_parquet(path)
-        logger.info(f"Loaded {len(df)} rows from cache: {path}")
+    """Load DataFrame from local cache (parquet or pickle)."""
+    parquet = CACHE_DIR / f"{name}.parquet"
+    pickle = CACHE_DIR / f"{name}.pkl"
+    if parquet.exists():
+        try:
+            df = pd.read_parquet(parquet)
+            logger.info(f"Loaded {len(df)} rows from cache: {parquet}")
+            return df
+        except Exception:
+            pass
+    if pickle.exists():
+        df = pd.read_pickle(pickle)
+        logger.info(f"Loaded {len(df)} rows from cache: {pickle}")
         return df
     return None
