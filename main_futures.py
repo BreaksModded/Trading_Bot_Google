@@ -17,7 +17,7 @@ from __future__ import annotations
 
 import asyncio
 import signal
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 from typing import Any
 
 from loguru import logger
@@ -76,13 +76,37 @@ class FuturesBot:
         except Exception as exc:
             logger.warning("set_leverage failed (continuing, set it manually): {}", exc)
 
-        # Restore risk state (peak + persisted HALTED flag -> death-loop fix).
-        peak = self.db.get_runtime_config("peak_equity")
+        # Restore risk state. Uses a FUTURES-specific peak key (never inherits the
+        # deleted spot bot's peak_equity) + day baselines + HALTED (death-loop fix).
+        peak = self.db.get_runtime_config("futures_peak_equity")
         halted = self.db.get_runtime_config("halted")
+        day_state = self.db.get_runtime_config("futures_day_state") or {}
+        cd: date | None = None
+        if day_state.get("current_day"):
+            try:
+                cd = date.fromisoformat(day_state["current_day"])
+            except (ValueError, TypeError):
+                cd = None
         self.risk.restore(
             peak_equity=float(peak) if isinstance(peak, (int, float)) else None,
             halted=bool(halted),
+            day_start_equity=float(day_state["day_start_equity"]) if day_state.get("day_start_equity") else None,
+            current_day=cd,
         )
+
+        # Recover an in-flight trend position's trailing stop (preserve the ratchet).
+        try:
+            pos0 = await self.pm.get_position()
+            ts0 = self.db.get_runtime_config("futures_trend_stop")
+            if not pos0.is_flat and isinstance(ts0, (int, float)) and ts0 > 0:
+                self.trend_stop = TrendStop(
+                    side="Buy" if pos0.side == "long" else "Sell", stop_price=float(ts0),
+                )
+                self.mode = "trend"
+                logger.info("Recovered trend {} position, stop={:.4f}", pos0.side, ts0)
+        except Exception as exc:
+            logger.warning("trend recovery failed: {}", exc)
+
         self._started_at = datetime.now(UTC)
         self.db.update_bot_state(status=BotStatus.RUNNING, started_at=self._started_at)
 
@@ -390,8 +414,16 @@ class FuturesBot:
         try:
             self.db.set_runtime_config("futures_risk_status", self.risk.status())
             if self.risk.peak_equity:
-                self.db.set_runtime_config("peak_equity", self.risk.peak_equity)
+                self.db.set_runtime_config("futures_peak_equity", self.risk.peak_equity)
             self.db.set_runtime_config("halted", self.risk.halted)
+            if self.risk.day_start_equity and self.risk.current_day:
+                self.db.set_runtime_config("futures_day_state", {
+                    "day_start_equity": self.risk.day_start_equity,
+                    "current_day": self.risk.current_day.isoformat(),
+                })
+            self.db.set_runtime_config(
+                "futures_trend_stop", self.trend_stop.stop_price if self.trend_stop else None,
+            )
         except Exception as exc:
             logger.debug("persist risk failed: {}", exc)
 
