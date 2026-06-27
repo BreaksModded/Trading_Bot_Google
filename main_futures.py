@@ -31,7 +31,7 @@ from core.position_manager import FuturesPositionManager
 from core.regime import MarketRegime, classify_futures_regime
 from core.trend import TrendStop, decide_trend
 from data.database import Database
-from data.models import BotStatus, EventLogRecord, TradeRecord
+from data.models import BotStatus, CircuitBreakerEvent, EventLogRecord, TradeRecord
 from services.health_monitor import HealthMonitor
 from services.notifier import TelegramNotifier
 
@@ -68,6 +68,10 @@ class FuturesBot:
         self._funding_rate: float = 0.0
         self._last_equity_ts: datetime | None = None
         self._last_cleanup_date: date | None = None
+        # Dashboard read-layer (Fase 0): rolling regime timeline + the last regime,
+        # stamped onto close trades. Neither feeds back into any trading decision.
+        self._regime_history: list[str] = []
+        self._last_regime: str = "transitional"
 
     # ── Lifecycle ─────────────────────────────────────────────────────
 
@@ -166,6 +170,7 @@ class FuturesBot:
             pos = await self.pm.get_position()
             if self.mode != "flat" or not pos.is_flat or self.pm.has_open_orders():
                 await self._flatten_all("kill_switch")
+            self._maybe_log_kill_switch(decision, equity)
             self.db.update_bot_state(status=BotStatus.PAUSED, message=decision.reason)
             logger.warning("[it {}] HALTED — {} (manual resume required)", it, decision.reason)
             return
@@ -198,6 +203,7 @@ class FuturesBot:
             self.mode, position.side, equity,
         )
 
+        self._last_regime = regime.value
         if regime in (MarketRegime.TRENDING_UP, MarketRegime.TRENDING_DOWN):
             await self._handle_trend(regime, regime_htf, ind, live_price, position, equity, free)
         elif regime == MarketRegime.RANGING:
@@ -205,7 +211,7 @@ class FuturesBot:
         else:
             await self._handle_transitional(position)
 
-        self._persist_state(equity, free, regime, ind, position)
+        self._persist_state(equity, free, regime, regime_htf, ind, position)
         await self._heartbeat()
         await self.health.ping_if_due()
 
@@ -322,13 +328,42 @@ class FuturesBot:
         except Exception as exc:
             logger.warning("set exchange SL failed: {}", exc)
 
+    def _maybe_log_kill_switch(self, decision, equity: float) -> None:
+        """Persist a CircuitBreakerEvent the first cycle a kill-switch fires.
+
+        After the trigger cycle the risk manager only returns
+        'halted_awaiting_manual_resume' (no ':'), so the prefix check logs exactly
+        once per halt episode. Read-layer/persistence only — it never alters the
+        trading decision, which has already been taken by the risk manager.
+        """
+        breaker_type, sep, raw = decision.reason.partition(":")
+        if not sep or breaker_type not in ("max_daily_loss", "max_total_drawdown"):
+            return
+        try:
+            trigger_value = float(raw)
+        except (TypeError, ValueError):
+            trigger_value = 0.0
+        threshold = (self.s.max_daily_loss_pct if breaker_type == "max_daily_loss"
+                     else self.s.max_total_drawdown_pct)
+        try:
+            self.db.log_circuit_breaker(CircuitBreakerEvent(
+                timestamp=datetime.now(UTC), breaker_type=breaker_type,
+                trigger_value=round(trigger_value, 6), threshold=threshold,
+                action_taken="flatten+halt",
+                details=f"equity={equity:.2f} symbol={self.symbol}",
+            ))
+        except Exception as exc:
+            logger.debug("log_circuit_breaker failed: {}", exc)
+
     def _maybe_cleanup(self, today: date) -> None:
         """Prune old event logs once a day so the DB does not grow unbounded."""
         if self._last_cleanup_date == today:
             return
         self._last_cleanup_date = today
         try:
-            self.db.cleanup_old_events(days=90)
+            # 14d retention (matches the file-log retention): the loguru→DB sink in
+            # run_bot() mirrors the per-cycle stream, so keep this table bounded.
+            self.db.cleanup_old_events(days=14)
         except Exception as exc:
             logger.debug("cleanup failed: {}", exc)
 
@@ -364,7 +399,7 @@ class FuturesBot:
                 timestamp=datetime.now(UTC), side=close_side, price=position.mark_price,
                 qty=position.size, fee=0.0, pnl=position.unrealized_pnl, status="filled",
                 symbol=self.symbol, order_type="Market", exchange_order_id=None,
-                metadata={"reason": reason},
+                metadata={"reason": reason, "regime": self._last_regime},
             ))
         except Exception as exc:
             await self._log("ERROR", "trend", f"close failed: {exc}")
@@ -424,15 +459,22 @@ class FuturesBot:
         except Exception as exc:
             logger.debug("persist risk failed: {}", exc)
 
-    def _persist_state(self, equity, free, regime, ind=None, position=None) -> None:
+    def _persist_state(self, equity, free, regime, regime_htf=None, ind=None, position=None) -> None:
         try:
             now = datetime.now(UTC)
             # Throttle equity-curve writes to ~1/min (loop runs every ~10s).
             if self._last_equity_ts is None or (now - self._last_equity_ts).total_seconds() >= 60:
                 self.db.record_equity(capital=equity, drawdown_pct=self.risk._last_drawdown)
                 self._last_equity_ts = now
+            # Rolling regime timeline for the dashboard (last 48 cycles).
+            self._regime_history.append(regime.value)
+            if len(self._regime_history) > 48:
+                self._regime_history = self._regime_history[-48:]
             blob = {
-                "mode": self.mode, "regime": regime.value, "symbol": self.symbol,
+                "mode": self.mode, "regime": regime.value,
+                "regime_htf": regime_htf.value if regime_htf is not None else None,
+                "regime_history": list(self._regime_history),
+                "symbol": self.symbol,
                 "leverage": self.s.leverage, "equity": equity, "free": free,
                 "peak_equity": self.risk.peak_equity, "funding_rate": self._funding_rate,
                 "trend_stop": self.trend_stop.stop_price if self.trend_stop else None,
@@ -515,7 +557,11 @@ class FuturesBot:
             ))
         except Exception:
             pass
-        logger.log(level if level in ("INFO", "WARNING", "ERROR", "CRITICAL") else "INFO", message)
+        # _skip_db: already persisted above with a clean module tag; tell the DB
+        # log-sink (run_bot) not to write a duplicate row for this same event.
+        logger.bind(_skip_db=True).log(
+            level if level in ("INFO", "WARNING", "ERROR", "CRITICAL") else "INFO", message,
+        )
         try:
             if level in ("ERROR", "CRITICAL", "WARNING"):
                 await self.notifier.send_alert(f"[{level}] {message}")
@@ -535,6 +581,31 @@ async def run_bot() -> None:
 
     db = Database(settings.db_full_path)
     db.init_schema()
+
+    # Fase 0 (§8.6): mirror the live loguru stream into event_logs so the dashboard
+    # Logs screen shows real per-cycle activity instead of only the few explicit
+    # _log() events. Read-layer only. Records from _log() carry _skip_db=True (already
+    # persisted with a module tag), and DB-writer records are skipped, so there is no
+    # duplication and no feedback loop. _maybe_cleanup bounds the table to 14 days.
+    def _db_log_sink(message) -> None:
+        rec = message.record
+        if rec["extra"].get("_skip_db"):
+            return
+        name = rec["name"] or "bot"
+        if "database" in name:
+            return
+        mod = name.split(".")[-1]
+        if mod in ("main_futures", "__main__"):
+            mod = "bot"
+        try:
+            db.log_event(EventLogRecord(
+                timestamp=rec["time"], level=rec["level"].name,
+                module=mod, message=rec["message"], payload={},
+            ))
+        except Exception:
+            pass
+
+    logger.add(_db_log_sink, level="INFO", enqueue=False)
 
     symbol = settings.futures.symbol
     exchange = BybitExchangeClient(
