@@ -107,6 +107,7 @@ class FuturesTrendBacktest:
         equity_curve: list[dict] = []
         fees_total = funding_total = 0.0
         peak = equity; max_dd = 0.0
+        regime_counts: dict = {}
 
         for i in range(warmup, len(df)):
             close = float(close_a[i]); high = float(high_a[i]); low = float(low_a[i])
@@ -116,6 +117,7 @@ class FuturesTrendBacktest:
                 adx_trend=s.adx_trend_threshold, adx_range=s.adx_range_threshold,
             )
             regime_htf = htf_reg[i]
+            regime_counts[regime] = regime_counts.get(regime, 0) + 1
             cl = float(cl_a[i]); cs = float(cs_a[i])
 
             # Funding at the real settlement times.
@@ -167,7 +169,7 @@ class FuturesTrendBacktest:
             fees_total += fee
 
         return {
-            "metrics": self._metrics(trades, equity, max_dd, fees_total, funding_total),
+            "metrics": self._metrics(trades, equity, max_dd, fees_total, funding_total, regime_counts),
             "trades": trades,
             "equity_curve": equity_curve,
         }
@@ -182,7 +184,7 @@ class FuturesTrendBacktest:
                        "qty": pos["qty"], "pnl": round(pnl, 4), "reason": reason})
         return equity + pnl, fee
 
-    def _metrics(self, trades, equity, max_dd, fees_total, funding_total) -> dict:
+    def _metrics(self, trades, equity, max_dd, fees_total, funding_total, regime_counts=None) -> dict:
         n = len(trades)
         wins = [t for t in trades if t["pnl"] > 0]
         losses = [t for t in trades if t["pnl"] < 0]
@@ -190,7 +192,9 @@ class FuturesTrendBacktest:
         avg_win = gp / len(wins) if wins else 0.0
         avg_loss = gl / len(losses) if losses else 0.0
         net = equity - self.initial_capital
-        return {
+        longs = [t for t in trades if t["side"] == "Buy"]
+        shorts = [t for t in trades if t["side"] == "Sell"]
+        m = {
             "net_pnl": round(net, 4),
             "return_pct": round(net / self.initial_capital * 100, 2),
             "final_equity": round(equity, 2),
@@ -204,6 +208,12 @@ class FuturesTrendBacktest:
             "max_drawdown_pct": round(max_dd * 100, 2),
             "fees_total": round(fees_total, 4),
             "funding_total": round(funding_total, 4),
+            "long_pnl": round(sum(t["pnl"] for t in longs), 4), "long_trades": len(longs),
+            "short_pnl": round(sum(t["pnl"] for t in shorts), 4), "short_trades": len(shorts),
             "note": "TREND mode only (range/transitional flat); shares live decide_trend; "
                     "real fees+slippage+funding+HTF filter -> faithful to the live bot.",
         }
+        if regime_counts:
+            total = sum(regime_counts.values()) or 1
+            m["time_in_regime_pct"] = {k.value: round(v / total * 100, 1) for k, v in regime_counts.items()}
+        return m

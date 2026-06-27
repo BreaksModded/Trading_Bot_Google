@@ -13,7 +13,6 @@ Notes:
 
 from __future__ import annotations
 
-import json
 import sys
 from datetime import datetime, timedelta
 
@@ -44,15 +43,51 @@ def main() -> None:
     except Exception as exc:
         print(f"(funding history unavailable: {exc} — using a flat estimate)")
 
+    rules = dict(qty_step="0.01", min_qty="0.01", funding_series=funding)
     bt = FuturesTrendBacktest(settings=Settings(), initial_capital=150.0)
-    # Real ETH-perp granularity (qty_step / min_qty); edit for other symbols.
-    result = bt.run(df, qty_step="0.01", min_qty="0.01", funding_series=funding)
 
-    print(f"\n=== Futures TREND backtest: {symbol} {timeframe} ~{months}m "
-          f"({len(df)} bars) ===")
-    print(json.dumps(result["metrics"], indent=2))
-    print("\nInterpretation: positive net_pnl + profit_factor > 1 + win_loss_ratio > 1.5 "
-          "(despite win_rate < 50%) = the positive-skew design is working.")
+    print(f"\n=== Futures TREND backtest: {symbol} {timeframe} ~{months}m ({len(df)} bars) ===")
+    _line("FULL ", bt.run(df, **rules)["metrics"], verbose=True)
+
+    # Walk-forward: train on the first 60%, validate OUT-OF-SAMPLE on the last 40%.
+    split = int(len(df) * 0.6)
+    train, test = df.iloc[:split].reset_index(drop=True), df.iloc[split:].reset_index(drop=True)
+    tr = bt.run(train, **rules)["metrics"]
+    te = bt.run(test, **rules)["metrics"]
+    print("\n--- Walk-forward ---")
+    _line("TRAIN", tr)
+    _line("TEST ", te)
+
+    # Sensitivity (anti-curve-fit): the edge should not collapse with small changes.
+    print("\n--- Sensibilidad (robustez) ---")
+    for mult in (2.5, 3.0, 3.5):
+        for adx in (20.0, 25.0, 30.0):
+            sset = Settings()
+            sset.futures.chandelier_atr_mult = mult
+            sset.futures.adx_trend_threshold = adx
+            r = FuturesTrendBacktest(settings=sset, initial_capital=150.0).run(df, **rules)["metrics"]
+            print(f"  Chandelier x{mult} / ADX>{adx:.0f}: net=${r['net_pnl']:>8} "
+                  f"PF={r['profit_factor']:>6} trades={r['trades']:>3}")
+
+    # Verdict against an explicit acceptance criterion.
+    pf = te["profit_factor"]
+    ok = te["net_pnl"] > 0 and te["trades"] >= 5 and (pf == float("inf") or pf > 1.0)
+    print("\n=== VEREDICTO (out-of-sample) ===")
+    print("✅ Hay edge: el TEST (datos NO vistos) es positivo con PF>1."
+          if ok else "❌ Sin edge claro out-of-sample — NO desplegar tal cual.")
+    print("Criterio: TEST net>0 y PF>1 con >=5 trades, y que la sensibilidad no se desplome.")
+    print("\nRecuerda: el backtest descarta estrategias malas; el juez final es forward (real pequeño).")
+
+
+def _line(title: str, m: dict, verbose: bool = False) -> None:
+    print(f"{title}: net=${m['net_pnl']} ({m['return_pct']}%) trades={m['trades']} "
+          f"win={m['win_rate_pct']}% PF={m['profit_factor']} W/L={m['win_loss_ratio']} "
+          f"maxDD={m['max_drawdown_pct']}%")
+    if verbose:
+        print(f"   long ${m['long_pnl']} ({m['long_trades']}) | short ${m['short_pnl']} "
+              f"({m['short_trades']}) | fees ${m['fees_total']} | funding ${m['funding_total']}")
+        if m.get("time_in_regime_pct"):
+            print(f"   tiempo en régimen: {m['time_in_regime_pct']}")
 
 
 if __name__ == "__main__":
