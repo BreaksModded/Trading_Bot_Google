@@ -67,6 +67,9 @@ class FuturesBot:
         self._entry_cooldown_until: datetime | None = None
         self._entry_cooldown_s = 120
         self._exchange_sl: float | None = None
+        self._funding_rate: float = 0.0
+        self._last_equity_ts: datetime | None = None
+        self._last_cleanup_date: date | None = None
 
     # ── Lifecycle ─────────────────────────────────────────────────────
 
@@ -159,6 +162,7 @@ class FuturesBot:
         now = datetime.now(UTC)
         decision = self.risk.evaluate(equity=equity, now=now)
         self._persist_risk(equity)
+        self._maybe_cleanup(now.date())
 
         if decision.flatten_and_halt:
             pos = await self.pm.get_position()
@@ -184,6 +188,10 @@ class FuturesBot:
         regime_htf = self._htf_regime(kl_htf)
         price = ind["close"]                      # last CLOSED candle (stable signals)
         live_price = await self._live_price(price)  # live tick (responsive stops)
+        try:
+            self._funding_rate = await self.exchange.get_funding_rate(symbol=self.symbol)
+        except Exception:
+            pass
         position = await self.pm.get_position()
 
         logger.info(
@@ -338,6 +346,16 @@ class FuturesBot:
         except Exception as exc:
             logger.warning("set exchange SL failed: {}", exc)
 
+    def _maybe_cleanup(self, today: date) -> None:
+        """Prune old event logs once a day so the DB does not grow unbounded."""
+        if self._last_cleanup_date == today:
+            return
+        self._last_cleanup_date = today
+        try:
+            self.db.cleanup_old_events(days=90)
+        except Exception as exc:
+            logger.debug("cleanup failed: {}", exc)
+
     # ── Position / order helpers ──────────────────────────────────────
 
     async def _flatten_all(self, reason: str) -> None:
@@ -432,13 +450,17 @@ class FuturesBot:
 
     def _persist_state(self, equity, free, regime, ind=None, position=None) -> None:
         try:
-            self.db.record_equity(capital=equity, drawdown_pct=self.risk._last_drawdown)
+            now = datetime.now(UTC)
+            # Throttle equity-curve writes to ~1/min (loop runs every ~10s).
+            if self._last_equity_ts is None or (now - self._last_equity_ts).total_seconds() >= 60:
+                self.db.record_equity(capital=equity, drawdown_pct=self.risk._last_drawdown)
+                self._last_equity_ts = now
             blob = {
                 "mode": self.mode, "regime": regime.value, "symbol": self.symbol,
                 "leverage": self.s.leverage, "equity": equity, "free": free,
-                "peak_equity": self.risk.peak_equity,
+                "peak_equity": self.risk.peak_equity, "funding_rate": self._funding_rate,
                 "trend_stop": self.trend_stop.stop_price if self.trend_stop else None,
-                "updated_at": datetime.now(UTC).isoformat(),
+                "updated_at": now.isoformat(),
             }
             if ind is not None:
                 blob["indicators"] = {

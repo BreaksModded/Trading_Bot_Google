@@ -538,10 +538,6 @@ class FuturesSettings(BaseSettings):
         default=0.15, ge=0.05, le=0.50,
         description="Require the liquidation price to sit at least this far beyond the grid",
     )
-    max_adverse_funding_rate: float = Field(
-        default=0.001, ge=0.0, le=0.01,
-        description="Pause new entries if 8h funding is worse than this against the net position",
-    )
 
     # ── Recenter ──
     recenter_after_stop: bool = Field(

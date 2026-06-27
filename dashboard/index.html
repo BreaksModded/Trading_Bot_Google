@@ -197,7 +197,8 @@
             <div class="regime">
               <div class="badge" id="regBadge">—</div>
               <div class="meta"><b id="regName">—</b><span class="mut" id="regDesc">—</span>
-                <span class="mut" style="font-size:12px">Modo: <span id="regMode" style="color:var(--text);font-weight:600">—</span></span></div>
+                <span class="mut" style="font-size:12px">Modo: <span id="regMode" style="color:var(--text);font-weight:600">—</span>
+                  · Funding 8h: <span id="regFunding" style="color:var(--text)">—</span></span></div>
             </div>
             <div class="indi">
               <div class="i"><div class="k">ADX</div><div class="v" id="iAdx">—</div></div>
@@ -313,6 +314,9 @@ function renderOverview(o){
   $('regBadge').textContent=r.i; $('regBadge').style.color=r.c; $('regBadge').style.borderColor=r.c;
   $('regName').textContent=r.n; $('regName').style.color=r.c; $('regDesc').textContent=r.d;
   $('regMode').textContent=MODE[st.mode]||'—';
+  const fr=st.funding_rate;
+  $('regFunding').textContent=(fr!=null&&!isNaN(fr))?(fr*100).toFixed(4)+'%':'—';
+  $('regFunding').className=(fr>0?'neg':(fr<0?'pos':''));  // longs pay when positive
   $('iAdx').textContent=fmtNum(ind.adx,1);
   const up=ind.ema_fast>ind.ema_slow, dn=ind.ema_fast<ind.ema_slow;
   $('iEma').textContent=(ind.ema_fast!=null)?(up?'↑ alcista':(dn?'↓ bajista':'—')):'—';
