@@ -673,7 +673,7 @@ async function control(action) {
   try {
     await api('/futures/control', { method: 'POST', body: JSON.stringify({ action }) });
     toast('Orden enviada: ' + labels[action]);
-    setTimeout(refreshAll, 800);
+    setTimeout(tick, 800);
   } catch (e) { toast('No se pudo enviar la orden', true); }
 }
 
