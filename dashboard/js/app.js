@@ -221,12 +221,6 @@ async function tick() {
     renderPanel(S.panel);
   } catch (e) { /* 401 ya gestionado; 429/otros: reintenta en el siguiente tick */ }
   if (!S.cfg) loadConfig();                 // reintenta hasta éxito (config es estática)
-  if (TICK % 4 === 1) updateLatency();
-}
-function updateLatency() {
-  api('/trading/market')
-    .then((m) => txt('top-latency', m && m.latency_ms ? Math.round(m.latency_ms) + ' ms' : '—'))
-    .catch(() => {});
 }
 
 /* ── Render: shell (sidebar + topbar, siempre) ───────────── */
@@ -244,6 +238,7 @@ function renderShell() {
   txt('top-symbol', (st.symbol || '—') + (st.symbol ? ' · PERP' : ''));
   txt('top-regime', regimeLabel(st.regime));
   txt('top-mode', modeLabel(st.mode));
+  txt('top-latency', ov.latency_ms ? Math.round(ov.latency_ms) + ' ms' : '—');
 
   const halted = !!risk.halted;
   show('halted-banner', halted);

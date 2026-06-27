@@ -35,6 +35,8 @@ async def overview(request: Request, _: str = Depends(verify_token)) -> dict:
         "risk": db.get_runtime_config("futures_risk_status") or {},
         "bot": db.get_bot_state() or {},
         "stats": stats,
+        # Cached latency kept fresh by the broadcast loop's ping(); avoids a REST call.
+        "latency_ms": getattr(request.app.state, "latest_latency_ms", 0.0),
     }
 
 
