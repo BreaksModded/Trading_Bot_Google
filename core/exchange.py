@@ -669,12 +669,13 @@ class BybitExchangeClient:
         if reduce_only:
             params["reduceOnly"] = True
         response = await self._run_http(client.place_order, **params)
-        if response.get("retCode") != 0:
-            logger.error(
-                "{}: linear market order rejected — retCode={} retMsg={}",
-                symbol, response.get("retCode"), response.get("retMsg"),
+        order_id = str(response.get("result", {}).get("orderId", ""))
+        if response.get("retCode") != 0 or not order_id:
+            raise ExchangeError(
+                f"{symbol} linear market order rejected: "
+                f"retCode={response.get('retCode')} retMsg={response.get('retMsg')}"
             )
-        return str(response.get("result", {}).get("orderId", ""))
+        return order_id
 
     async def close_position_market(self, *, symbol: str, side: str, qty: float) -> str:
         """Flatten (part of) a position with a reduce-only market order.

@@ -17,7 +17,7 @@ from __future__ import annotations
 
 import asyncio
 import signal
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from loguru import logger
@@ -64,6 +64,9 @@ class FuturesBot:
         self.running = True
         self._shutdown = asyncio.Event()
         self._started_at: datetime | None = None
+        self._entry_cooldown_until: datetime | None = None
+        self._entry_cooldown_s = 120
+        self._exchange_sl: float | None = None
 
     # ── Lifecycle ─────────────────────────────────────────────────────
 
@@ -155,7 +158,8 @@ class FuturesBot:
             adx_trend=self.s.adx_trend_threshold, adx_range=self.s.adx_range_threshold,
         )
         regime_htf = self._htf_regime(kl_htf)
-        price = ind["close"]
+        price = ind["close"]                      # last CLOSED candle (stable signals)
+        live_price = await self._live_price(price)  # live tick (responsive stops)
         position = await self.pm.get_position()
 
         logger.info(
@@ -165,9 +169,9 @@ class FuturesBot:
         )
 
         if regime in (MarketRegime.TRENDING_UP, MarketRegime.TRENDING_DOWN):
-            await self._handle_trend(regime, regime_htf, ind, price, position, equity, free)
+            await self._handle_trend(regime, regime_htf, ind, live_price, position, equity, free)
         elif regime == MarketRegime.RANGING:
-            await self._handle_range(ind, price, position, free)
+            await self._handle_range(ind, price, live_price, position, free)
         else:
             await self._handle_transitional(position)
 
@@ -177,11 +181,14 @@ class FuturesBot:
 
     # ── Regime handlers ───────────────────────────────────────────────
 
-    async def _handle_trend(self, regime, regime_htf, ind, price, position, equity, free) -> None:
+    async def _handle_trend(self, regime, regime_htf, ind, live_price, position, equity, free) -> None:
         desired_side = "Buy" if regime == MarketRegime.TRENDING_UP else "Sell"
         desired_pos = "long" if desired_side == "Buy" else "short"
 
         if position.is_flat:
+            now = datetime.now(UTC)
+            if self._entry_cooldown_until and now < self._entry_cooldown_until:
+                return
             if self.pm.has_open_orders():  # clear any grid first
                 await self.pm.cancel_all()
                 self.pm.reset()
@@ -197,7 +204,7 @@ class FuturesBot:
                 chandelier_short=ind["chandelier_short"],
             )
             qty = compute_fixed_fractional_qty(
-                equity=equity, risk_pct=self.s.risk_per_trade_pct, entry_price=price,
+                equity=equity, risk_pct=self.s.risk_per_trade_pct, entry_price=live_price,
                 stop_price=stop.stop_price, qty_step=self.rules.qty_step,
                 min_qty=self.rules.min_qty, available_margin=free, leverage=self.s.leverage,
             )
@@ -209,13 +216,26 @@ class FuturesBot:
                 await self.exchange.place_market_linear(
                     symbol=self.symbol, side=entry.side, qty=qty, reduce_only=False,
                 )
-                self.trend_stop = stop
-                self.mode = "trend"
-                await self._log("INFO", "trend",
-                                f"ENTER {entry.side} {qty} @ ~{price:.2f} "
-                                f"stop={stop.stop_price:.2f} risk={self.s.risk_per_trade_pct:.1%}")
             except Exception as exc:
-                await self._log("ERROR", "trend", f"entry failed: {exc}")
+                self._entry_cooldown_until = now + timedelta(seconds=self._entry_cooldown_s)
+                await self._log("ERROR", "trend",
+                                f"entry failed (cooldown {self._entry_cooldown_s}s): {exc}")
+                self.mode = "flat"
+                return
+            # Confirm the position actually opened before committing to trend mode.
+            opened = await self.pm.get_position()
+            if opened.is_flat:
+                self._entry_cooldown_until = now + timedelta(seconds=self._entry_cooldown_s)
+                await self._log("WARNING", "trend",
+                                "entry order placed but no position detected — cooldown")
+                self.mode = "flat"
+                return
+            self.trend_stop = stop
+            self.mode = "trend"
+            await self._set_exchange_sl(stop.stop_price)  # exchange-side crash backstop
+            await self._log("INFO", "trend",
+                            f"ENTER {entry.side} {opened.size} @ ~{live_price:.2f} "
+                            f"stop={stop.stop_price:.2f} risk={self.s.risk_per_trade_pct:.1%}")
             return
 
         # We hold a position.
@@ -227,14 +247,19 @@ class FuturesBot:
                 desired_side, chandelier_long=ind["chandelier_long"],
                 chandelier_short=ind["chandelier_short"],
             )
-        self.trend_stop.update(
+        prev_stop = self.trend_stop.stop_price
+        new_stop = self.trend_stop.update(
             chandelier_long=ind["chandelier_long"], chandelier_short=ind["chandelier_short"],
         )
         self.mode = "trend"
-        if self.trend_stop.is_hit(price):
+        # Ratchet the exchange-side stop only when it moves materially (>0.2%).
+        if abs(new_stop - prev_stop) / max(prev_stop, 1e-9) > 0.002:
+            await self._set_exchange_sl(new_stop)
+        # Software stop on the LIVE price (responsive, not the closed-candle close).
+        if self.trend_stop.is_hit(live_price):
             await self._close_position(position, "chandelier_stop")
 
-    async def _handle_range(self, ind, price, position, free) -> None:
+    async def _handle_range(self, ind, price, live_price, position, free) -> None:
         if not position.is_flat:  # close a leftover trend position before gridding
             await self._close_position(position, "range_entry")
             return
@@ -257,8 +282,11 @@ class FuturesBot:
                 await self._log("INFO", "grid",
                                 f"grid placed: {placed} orders, spacing {plan.spacing_pct:.2%}")
         else:
-            # ATR safety stop: bail out of the grid if price leaves the SL band.
-            if self.grid_plan and (price < self.grid_plan.stop_loss_lower or price > self.grid_plan.stop_loss_upper):
+            # ATR safety stop on the LIVE price: bail if price leaves the SL band.
+            if self.grid_plan and (
+                live_price < self.grid_plan.stop_loss_lower
+                or live_price > self.grid_plan.stop_loss_upper
+            ):
                 await self._flatten_all("grid_atr_stop")
             else:
                 await self.pm.sync_orders()
@@ -266,6 +294,22 @@ class FuturesBot:
     async def _handle_transitional(self, position) -> None:
         if self.mode != "flat" or not position.is_flat or self.pm.has_open_orders():
             await self._flatten_all("transitional")
+
+    async def _live_price(self, fallback: float) -> float:
+        """Latest traded price for responsive stop checks; falls back to the
+        last closed-candle close on error."""
+        try:
+            return await self.exchange.get_last_price(symbol=self.symbol)
+        except Exception:
+            return fallback
+
+    async def _set_exchange_sl(self, stop_price: float) -> None:
+        """Attach/update an exchange-side stop-loss as a crash/disconnect backstop."""
+        try:
+            await self.exchange.set_position_stop_loss(symbol=self.symbol, stop_price=stop_price)
+            self._exchange_sl = stop_price
+        except Exception as exc:
+            logger.warning("set exchange SL failed: {}", exc)
 
     # ── Position / order helpers ──────────────────────────────────────
 
@@ -281,6 +325,7 @@ class FuturesBot:
         self.mode = "flat"
         self.trend_stop = None
         self.grid_plan = None
+        self._exchange_sl = None
 
     async def _close_position(self, position, reason: str) -> None:
         close_side = "Sell" if position.side == "long" else "Buy"
@@ -304,6 +349,7 @@ class FuturesBot:
             await self._log("ERROR", "trend", f"close failed: {exc}")
         self.mode = "flat"
         self.trend_stop = None
+        self._exchange_sl = None
 
     # ── Indicators ────────────────────────────────────────────────────
 
