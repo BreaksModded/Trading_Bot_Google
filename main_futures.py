@@ -262,6 +262,17 @@ class FuturesBot:
             await self._log("INFO", "trend",
                             f"ENTER {decision.side} {opened.size} @ ~{live_price:.2f} "
                             f"stop={decision.stop.stop_price:.2f} risk={self.s.risk_per_trade_pct:.1%}")
+            # Record the entry so the dashboard shows the open (read/record layer only,
+            # reached only after `opened` is confirmed non-flat above). pnl=0 → excluded
+            # from win-rate/PF/avg/total (they count only ABS(pnl)>1e-12); the close is
+            # recorded separately in _close_position, so there is no double count.
+            await asyncio.to_thread(self.db.insert_trade, TradeRecord(
+                timestamp=datetime.now(UTC), side=decision.side,
+                price=opened.entry_price or live_price, qty=opened.size,
+                fee=0.0, pnl=0.0, status="filled", symbol=self.symbol,
+                order_type="Market", exchange_order_id=None,
+                metadata={"reason": "trend_entry", "regime": self._last_regime},
+            ))
         elif decision.action == "close":
             await self._close_position(position, decision.reason)
         elif decision.action == "hold":
