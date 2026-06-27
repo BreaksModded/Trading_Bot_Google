@@ -478,13 +478,22 @@ class Database:
             """, (limit,))
             return [dict(row) for row in reversed(cur.fetchall())]
 
-    def get_trade_stats(self, since: datetime | None = None) -> dict[str, Any]:
+    def get_trade_stats(self, since: datetime | None = None, symbol: str | None = None) -> dict[str, Any]:
         """Compute aggregate trade statistics with profit factor.
 
-        Separates closed trades (pnl ≠ 0) from raw executions.
+        Separates closed trades (pnl ≠ 0) from raw executions. Optionally scoped to
+        a single symbol (read-only filter; does not change how trades are written).
         """
-        where_sql = "WHERE timestamp >= ?" if since else ""
-        params: tuple[Any, ...] = (since.isoformat(),) if since else ()
+        clauses: list[str] = []
+        params_list: list[Any] = []
+        if since:
+            clauses.append("timestamp >= ?")
+            params_list.append(since.isoformat())
+        if symbol:
+            clauses.append("symbol = ?")
+            params_list.append(symbol)
+        where_sql = ("WHERE " + " AND ".join(clauses)) if clauses else ""
+        params: tuple[Any, ...] = tuple(params_list)
         with self._cursor() as cur:
             cur.execute(
                 f"""
@@ -522,11 +531,13 @@ class Database:
         try:
             from datetime import timedelta as _td
             since_24h = datetime.now(UTC) - _td(hours=24)
+            pnl_q = "SELECT SUM(pnl) FROM trades WHERE timestamp >= ?"
+            pnl_params: list[Any] = [since_24h.isoformat()]
+            if symbol:
+                pnl_q += " AND symbol = ?"
+                pnl_params.append(symbol)
             with self._cursor() as cur2:
-                cur2.execute(
-                    "SELECT SUM(pnl) FROM trades WHERE timestamp >= ?",
-                    (since_24h.isoformat(),),
-                )
+                cur2.execute(pnl_q, tuple(pnl_params))
                 r = cur2.fetchone()
                 pnl_24h = float(r[0] or 0.0) if r else 0.0
         except Exception as exc:
