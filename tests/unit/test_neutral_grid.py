@@ -15,16 +15,17 @@ def _settings(**overrides) -> FuturesSettings:
         symbol="ETHUSDT", leverage=2, grid_levels=8, use_atr_range=False,
         grid_range_pct=0.10, min_spacing_pct=0.004, capital_fraction=0.8,
         order_size_usdt=0.0, min_order_usdt=5.0, stop_loss_pct=0.12,
+        grid_risk_pct=0.0,  # raw sizing for the base tests; cap tested separately
     )
     base.update(overrides)
     return FuturesSettings(**base)
 
 
-def _plan(qty_step="0.01", **overrides):
+def _plan(qty_step="0.01", min_qty="0.01", **overrides):
     return build_grid_plan(
         symbol="ETHUSDT", mid=2000.0, atr_pct=0.0, settings=_settings(**overrides),
         available_usdt=150.0, qty_step=Decimal(qty_step),
-        min_qty=Decimal("0.01"), tick_size=Decimal("0.01"),
+        min_qty=Decimal(min_qty), tick_size=Decimal("0.01"),
     )
 
 
@@ -89,3 +90,19 @@ def test_validate_rejects_subfee_spacing():
 def test_validate_accepts_healthy_grid():
     ok, reason = validate_grid(_plan(), min_order_usdt=5.0)
     assert ok, reason
+
+
+def test_risk_cap_shrinks_oversized_grid():
+    # With a risk budget (and a fine min_qty so the cap can bite), the grid is sized
+    # smaller than the raw leverage sizing and stays within budget.
+    raw = _plan(qty_step="0.0001", min_qty="0.0001", grid_risk_pct=0.0)
+    capped = _plan(qty_step="0.0001", min_qty="0.0001", grid_risk_pct=0.04)
+    assert capped.notional_per_level < raw.notional_per_level
+    assert capped.worst_case_loss <= 150 * 0.04 * 1.20
+
+
+def test_validate_rejects_grid_over_risk_budget():
+    # A high-leverage grid that the exchange minimum forces above budget is rejected.
+    plan = _plan(qty_step="0.0001", grid_risk_pct=0.0, leverage=10)
+    ok, reason = validate_grid(plan, min_order_usdt=5.0, capital=150.0, grid_risk_pct=0.01)
+    assert not ok and "risk budget" in reason

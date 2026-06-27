@@ -44,6 +44,7 @@ class GridPlan:
     upper_bound: float
     stop_loss_lower: float
     stop_loss_upper: float
+    worst_case_loss: float = 0.0  # one side fully filled + price at the stop band
     levels: list[GridLevelSpec] = field(default_factory=list)
 
     @property
@@ -106,11 +107,21 @@ def build_grid_plan(
     else:
         max_notional = available_usdt * settings.capital_fraction * settings.leverage
         per_level_notional = (max_notional / n) if n else 0.0
+
+    # Risk cap: bound the worst-case loss (one side fully filled, price at the stop
+    # band) to grid_risk_pct of capital — the same risk philosophy as the trend
+    # engine, so leverage cannot silently oversize the grid.
+    worst_loss_frac = settings.stop_loss_pct + spacing * (n - 1) / 2.0
+    grid_risk_pct = getattr(settings, "grid_risk_pct", 0.0)
+    if grid_risk_pct > 0 and worst_loss_frac > 0 and n > 0:
+        max_per_level_risk = (grid_risk_pct * available_usdt) / (n * worst_loss_frac)
+        per_level_notional = min(per_level_notional, max_per_level_risk)
     per_level_notional = max(per_level_notional, settings.min_order_usdt)
 
     qty = _round_down(per_level_notional / mid, qty_step)
     if qty < float(min_qty):
         qty = float(min_qty)  # floor to exchange minimum; viability checked by caller
+    worst_case_loss = qty * mid * n * worst_loss_frac
 
     levels: list[GridLevelSpec] = []
     for i in range(1, n + 1):
@@ -133,6 +144,7 @@ def build_grid_plan(
         upper_bound=upper_bound,
         stop_loss_lower=sl_lower,
         stop_loss_upper=sl_upper,
+        worst_case_loss=worst_case_loss,
         levels=levels,
     )
 
@@ -153,13 +165,16 @@ def partner_order(
 
 
 def validate_grid(
-    plan: GridPlan, *, min_order_usdt: float, round_trip_fee_pct: float = 0.0011,
+    plan: GridPlan, *, min_order_usdt: float, capital: float = 0.0,
+    grid_risk_pct: float = 0.0, round_trip_fee_pct: float = 0.0011,
 ) -> tuple[bool, str]:
-    """Check the grid is economically viable before placing it.
+    """Check the grid is economically viable AND within the risk budget.
 
     - Per-level notional must clear the exchange minimum.
     - Spacing must capture at least 3x the round-trip fee, otherwise the grid
       churns fees without an edge (the exact failure mode the audit found).
+    - Worst-case loss must fit the risk budget; if the exchange minimum forced a
+      size above budget, the grid is too risky at this capital and is skipped.
     """
     if plan.notional_per_level < min_order_usdt:
         return False, f"per-level notional {plan.notional_per_level:.2f} < min {min_order_usdt:.2f}"
@@ -167,5 +182,10 @@ def validate_grid(
         return False, (
             f"spacing {plan.spacing_pct * 100:.3f}% < 3x round-trip fee "
             f"({3 * round_trip_fee_pct * 100:.3f}%)"
+        )
+    if grid_risk_pct > 0 and capital > 0 and plan.worst_case_loss > capital * grid_risk_pct * 1.15:
+        return False, (
+            f"worst-case loss {plan.worst_case_loss:.2f} exceeds risk budget "
+            f"{capital * grid_risk_pct:.2f} ({grid_risk_pct:.0%} of {capital:.0f})"
         )
     return True, "ok"

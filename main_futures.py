@@ -293,7 +293,10 @@ class FuturesBot:
                 available_usdt=free, qty_step=self.rules.qty_step,
                 min_qty=self.rules.min_qty, tick_size=self.rules.tick_size,
             )
-            ok, reason = validate_grid(plan, min_order_usdt=self.s.min_order_usdt)
+            ok, reason = validate_grid(
+                plan, min_order_usdt=self.s.min_order_usdt,
+                capital=free, grid_risk_pct=self.s.grid_risk_pct,
+            )
             if not ok:
                 logger.info("grid not viable: {}", reason)
                 self.mode = "flat"

@@ -581,6 +581,11 @@ class FuturesSettings(BaseSettings):
         default=0.015, ge=0.0025, le=0.05,
         description="Equity fraction risked per trade; position is sized off the stop distance",
     )
+    grid_risk_pct: float = Field(
+        default=0.04, ge=0.0, le=0.20,
+        description="Cap the grid's worst-case loss (one side filled + stop band) to this "
+                    "fraction of capital; 0 disables the cap (raw leverage sizing)",
+    )
     max_daily_loss_pct: float = Field(
         default=0.06, ge=0.01, le=0.30,
         description="Kill-switch: halt + flatten if account is down this much in a day",
