@@ -64,6 +64,25 @@ const regimeLabel = (r) => REG_LABEL[regimeKind(r)];
 const regimeColor = (r) => REG_COLOR[regimeKind(r)];
 const MODE_LABEL = { trend: 'Tendencia', grid: 'Grid', flat: 'Plano' };
 const modeLabel = (m) => MODE_LABEL[m] || (m || '—');
+const REASON_LABEL = {
+  chandelier_stop: 'Stop Chandelier',
+  trend_reversal: 'Cambio de tendencia',
+  htf_conflict: 'Conflicto TF superior',
+  range_entry: 'Reasignado a rango',
+  grid_atr_stop: 'Stop ATR de grid',
+  kill_switch: 'Kill-switch',
+  transitional: 'Zona transicional',
+  manual_flatten: 'Cierre manual',
+  grid_entry: 'Grid · entrada',
+  grid_tp: 'Grid · toma de beneficio',
+  trend_entry: 'Entrada tendencia',
+};
+function reasonLabel(code, side) {
+  if (!code) return '—';
+  const base = REASON_LABEL[code] || code;   // fallback: muestra el código crudo
+  if (code === 'trend_entry') return base + (side === 'Buy' ? ' ↑' : side === 'Sell' ? ' ↓' : '');
+  return base;
+}
 
 function timeHM(iso) {
   const d = parseTs(iso); if (!d) return '—';
@@ -356,7 +375,7 @@ function renderRecent() {
       <td class="r mono">${money(t.price, priceDp(t.price))}</td>
       <td class="r mono">${num(t.qty, 4)}</td>
       <td class="r mono ${pnlClass(t.pnl)}">${signedMoney(t.pnl)}</td>
-      <td>${escapeHtml(m.reason || '—')}</td></tr>`;
+      <td>${escapeHtml(reasonLabel(m.reason, t.side))}</td></tr>`;
   }).join('');
 }
 
@@ -400,7 +419,7 @@ function renderOperaciones() {
       <td class="r mono">${money(notional)}</td>
       <td class="r mono ${pnlClass(t.pnl)}">${signedMoney(t.pnl)}</td>
       <td class="r mono ${pnlClass(t.pnl)}">${roe == null ? '—' : signedPct(roe)}</td>
-      <td>${escapeHtml(m.reason || '—')}</td>
+      <td>${escapeHtml(reasonLabel(m.reason, t.side))}</td>
       <td><span class="reg-dot"><span class="d" style="background:${rc}"></span>${escapeHtml(rl)}</span></td></tr>`;
   }).join('');
 }
