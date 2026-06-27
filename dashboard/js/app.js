@@ -1,7 +1,9 @@
 /* ============================================================================
    GRIDBOT · Panel de Futuros — lógica de la aplicación
-   Vanilla JS. Auth JWT, capa de lectura de la API, WebSocket (señal de cambio)
-   con fallback a polling, router de pantallas y gráficos con Lightweight Charts.
+   Vanilla JS. Auth JWT, capa de lectura de la API, router de pantallas y gráficos
+   con Lightweight Charts. Refresco: polling frugal como base; el WebSocket solo
+   actúa como señal de cambio cuando hay contraseña en memoria (no tras recargar
+   con token), nunca como transporte de datos.
    ========================================================================== */
 (() => {
 'use strict';
@@ -330,8 +332,11 @@ function renderResumen() {
 }
 function posTime(pos) {
   const want = pos.side === 'long' ? 'Buy' : 'Sell';
-  for (const t of S.trades) {              // newest-first
-    if (t.side === want && Math.abs(t.pnl || 0) < 1e-9) return 'hace ' + relTime(t.timestamp);
+  for (const t of S.trades) {              // reliable source: the recorded trend entry
+    if (t.side === want && meta(t).reason === 'trend_entry') return relTime(t.timestamp);
+  }
+  for (const t of S.trades) {              // fallback heuristic: grid fills also have pnl≈0 → approx
+    if (t.side === want && Math.abs(t.pnl || 0) < 1e-9) return '~' + relTime(t.timestamp);
   }
   return '—';
 }
