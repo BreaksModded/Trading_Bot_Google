@@ -303,12 +303,12 @@ class BybitExchangeClient:
 
     # ── REST: Market Data ─────────────────────────────────────────────
 
-    async def get_last_price(self, symbol: str | None = None) -> float:
+    async def get_last_price(self, symbol: str | None = None, category: str | None = None) -> float:
         """Fetch latest traded price for symbol."""
         target = symbol or self.symbol
         client = self._ensure_http()
         response = await self._run_http(
-            client.get_tickers, category=self.category, symbol=target,
+            client.get_tickers, category=category or self.category, symbol=target,
         )
         rows = response.get("result", {}).get("list", [])
         if not rows:
@@ -342,6 +342,7 @@ class BybitExchangeClient:
         symbol: str | None = None,
         interval: str | None = None,
         limit: int = 500,
+        category: str | None = None,
     ) -> pd.DataFrame:
         """Get kline history as normalized DataFrame for indicators."""
         target_symbol = symbol or self.symbol
@@ -349,7 +350,7 @@ class BybitExchangeClient:
         client = self._ensure_http()
         response = await self._run_http(
             client.get_kline,
-            category=self.category,
+            category=category or self.category,
             symbol=target_symbol,
             interval=target_interval,
             limit=limit,
