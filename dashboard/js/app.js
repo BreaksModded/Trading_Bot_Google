@@ -9,7 +9,7 @@
 'use strict';
 
 const TOKEN_KEY = 'gridbot_token';
-const POLL_FAST = 3000;   // sin WS
+const POLL_FAST = 5000;   // sin WS (el bot escribe estado cada ~10s → 5s sobra)
 const POLL_SLOW = 12000;  // con WS (latido de seguridad)
 
 const S = {
