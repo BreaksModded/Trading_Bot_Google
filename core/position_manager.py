@@ -179,11 +179,13 @@ class FuturesPositionManager:
         fee = float(fill_event.get("execFee") or 0.0)
         if qty <= 0:
             return None
-        # Realized PnL is reconciled separately from Bybit's closed-pnl endpoint
-        # (accounting phase); MTM equity is the primary truth.
+        # Bybit reports realized PnL on the position-reducing fill via 'closedPnl'
+        # (0 on opening fills). Recording it makes the grid's profit/loss real in
+        # the dashboard stats instead of always 0.
+        realized = float(fill_event.get("closedPnl") or 0.0)
         return TradeRecord(
             timestamp=datetime.now(UTC), side=side, price=price, qty=qty,
-            fee=fee, pnl=0.0, status="filled", symbol=self.symbol,
+            fee=fee, pnl=realized, status="filled", symbol=self.symbol,
             order_type="Limit", exchange_order_id=order_id, metadata=fill_event,
         )
 
