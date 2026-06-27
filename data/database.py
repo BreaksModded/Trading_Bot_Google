@@ -514,6 +514,8 @@ class Database:
         gross_profit = float(row["gross_profit"] or 0.0)
         gross_loss = float(row["gross_loss"] or 0.0)
         profit_factor = gross_profit / gross_loss if gross_loss else 0.0
+        avg_win = gross_profit / winners if winners else 0.0
+        avg_loss = gross_loss / losers if losers else 0.0  # positive magnitude
 
         # 24h PnL for daily summary
         pnl_24h = 0.0
@@ -538,6 +540,8 @@ class Database:
             "losers": losers,
             "win_rate": win_rate,
             "average_pnl": avg_pnl,
+            "avg_win": avg_win,
+            "avg_loss": avg_loss,
             "total_pnl": total_pnl,
             "pnl_24h": pnl_24h,
             "gross_profit": gross_profit,
