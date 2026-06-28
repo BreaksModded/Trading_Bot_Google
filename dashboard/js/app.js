@@ -642,8 +642,8 @@ function chartTheme(h, interactive) {
     height: h,
     layout: { background: { color: '#ffffff' }, textColor: '#9a9384', fontFamily: "'IBM Plex Mono', monospace", fontSize: 10 },
     grid: { vertLines: { color: '#f4f0e7' }, horzLines: { color: '#f4f0e7' } },
-    rightPriceScale: { borderColor: '#e2ddd0' },
-    timeScale: { borderColor: '#e2ddd0', timeVisible: true, secondsVisible: false },
+    rightPriceScale: { borderColor: '#e2ddd0', scaleMargins: { top: 0.12, bottom: 0.12 } },
+    timeScale: { borderColor: '#e2ddd0', timeVisible: true, secondsVisible: false, rightOffset: 6 },
     crosshair: { mode: 0, vertLine: { color: '#cabfa8', width: 1, style: 2, labelBackgroundColor: '#16140f' }, horzLine: { color: '#cabfa8', width: 1, style: 2, labelBackgroundColor: '#16140f' } },
     handleScroll: interactive, handleScale: interactive,
   };
@@ -662,26 +662,52 @@ async function ensurePriceChart(hostId, height, tf, st) {
   if (!C) {
     if (!host.clientWidth) { requestAnimationFrame(() => ensurePriceChart(hostId, height, tf, st)); return; }
     const chart = LightweightCharts.createChart(host, { width: host.clientWidth, ...chartTheme(height, hostId === 'chart-grafico') });
-    const candle = chart.addCandlestickSeries({ upColor: '#0f7a52', downColor: '#c8453a', borderUpColor: '#0f7a52', borderDownColor: '#c8453a', wickUpColor: '#3fbf83', wickDownColor: '#e0655c' });
-    const ema50 = chart.addLineSeries({ color: '#16140f', lineWidth: 1, priceLineVisible: false, lastValueVisible: false });
-    const ema200 = chart.addLineSeries({ color: '#c98a2b', lineWidth: 1, lineStyle: 2, priceLineVisible: false, lastValueVisible: false });
-    C = S.charts[hostId] = { chart, candle, ema50, ema200, entry: null, stop: null, tf: null, loadedSym: null };
+    C = S.charts[hostId] = { chart, candle: null, ema50: null, ema200: null, entry: null, stop: null, tf: null, loadedSym: null, _candles: [], _ema50: [], _ema200: [] };
+    // La escala de precio se ajusta a las velas + EMAs VISIBLES, ignorando las price lines del
+    // grid/entrada/stop (que si no aplastan las velas al hacer zoom dentro de la banda).
+    C.candle = chart.addCandlestickSeries({
+      upColor: '#0f7a52', downColor: '#c8453a', borderUpColor: '#0f7a52', borderDownColor: '#c8453a', wickUpColor: '#3fbf83', wickDownColor: '#e0655c',
+      autoscaleInfoProvider: () => {
+        const cs = C._candles; if (!cs || !cs.length) return null;
+        const vr = chart.timeScale().getVisibleRange();
+        const inR = (t) => !vr || (t >= vr.from && t <= vr.to);
+        let lo = Infinity, hi = -Infinity;
+        for (const c of cs) if (inR(c.time)) { if (c.low < lo) lo = c.low; if (c.high > hi) hi = c.high; }
+        for (const p of C._ema50) if (inR(p.time)) { if (p.value < lo) lo = p.value; if (p.value > hi) hi = p.value; }
+        for (const p of C._ema200) if (inR(p.time)) { if (p.value < lo) lo = p.value; if (p.value > hi) hi = p.value; }
+        if (!isFinite(lo) || !isFinite(hi)) return null;
+        const pad = (hi - lo) * 0.08 || hi * 0.001;
+        return { priceRange: { minValue: lo - pad, maxValue: hi + pad } };
+      },
+    });
+    C.ema50 = chart.addLineSeries({ color: '#16140f', lineWidth: 1, priceLineVisible: false, lastValueVisible: false });
+    C.ema200 = chart.addLineSeries({ color: '#c98a2b', lineWidth: 1, lineStyle: 2, priceLineVisible: false, lastValueVisible: false });
     window.addEventListener('resize', () => { if (host.clientWidth) chart.applyOptions({ width: host.clientWidth }); });
   }
   C.chart.applyOptions({ width: host.clientWidth || 600 });
   const sym = st.symbol;
-  // Recargar las velas al cambiar de TF/símbolo Y periódicamente (~15s) para que el gráfico
-  // avance en vivo. Antes solo cargaba una vez → se quedaba congelado mientras pasaba el tiempo.
   const tfChanged = (C.tf !== tf || C.loadedSym !== sym);
   const stale = !C._klinesAt || (Date.now() - C._klinesAt) > 15000;
-  if (tfChanged || stale) {
+  if (tfChanged) {
+    // Primer load / cambio de TF: datos completos + encuadrar.
     const candles = await loadKlines(sym, tf);
-    if (candles.length) {                 // marca cargado SOLO con éxito → reintenta si vino vacío
+    if (candles.length) {
       C.tf = tf; C.loadedSym = sym; C._candles = candles; C._klinesAt = Date.now();
-      C.candle.setData(candles);
-      C.ema50.setData(emaData(candles, 50));
-      C.ema200.setData(emaData(candles, 200));
-      C.chart.timeScale().fitContent();   // encuadrar para que la última vela quede siempre a la vista
+      C._ema50 = emaData(candles, 50); C._ema200 = emaData(candles, 200);
+      C.candle.setData(candles); C.ema50.setData(C._ema50); C.ema200.setData(C._ema200);
+      C.chart.timeScale().fitContent();
+    }
+  } else if (stale) {
+    // Refresco en vivo (~15s): update() de la vela en curso + las nuevas, SIN tocar el zoom/pan
+    // del usuario (antes hacía fitContent y se perdía el zoom). Sigue el borde si estás en él.
+    const fresh = await loadKlines(sym, tf);
+    if (fresh.length) {
+      const lastT = C._candles.length ? C._candles[C._candles.length - 1].time : 0;
+      const e50 = emaData(fresh, 50), e200 = emaData(fresh, 200);
+      for (const b of fresh) if (b.time >= lastT) C.candle.update(b);
+      for (const p of e50) if (p.time >= lastT) C.ema50.update(p);
+      for (const p of e200) if (p.time >= lastT) C.ema200.update(p);
+      C._candles = fresh; C._ema50 = e50; C._ema200 = e200; C._klinesAt = Date.now();
     }
   }
   if (C._candles && C._candles.length) updatePriceOverlays(C, st);
