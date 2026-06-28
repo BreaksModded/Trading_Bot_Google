@@ -670,14 +670,18 @@ async function ensurePriceChart(hostId, height, tf, st) {
   }
   C.chart.applyOptions({ width: host.clientWidth || 600 });
   const sym = st.symbol;
-  if (C.tf !== tf || C.loadedSym !== sym) {
+  // Recargar las velas al cambiar de TF/símbolo Y periódicamente (~15s) para que el gráfico
+  // avance en vivo. Antes solo cargaba una vez → se quedaba congelado mientras pasaba el tiempo.
+  const tfChanged = (C.tf !== tf || C.loadedSym !== sym);
+  const stale = !C._klinesAt || (Date.now() - C._klinesAt) > 15000;
+  if (tfChanged || stale) {
     const candles = await loadKlines(sym, tf);
     if (candles.length) {                 // marca cargado SOLO con éxito → reintenta si vino vacío
-      C.tf = tf; C.loadedSym = sym; C._candles = candles;
+      C.tf = tf; C.loadedSym = sym; C._candles = candles; C._klinesAt = Date.now();
       C.candle.setData(candles);
       C.ema50.setData(emaData(candles, 50));
       C.ema200.setData(emaData(candles, 200));
-      C.chart.timeScale().fitContent();
+      C.chart.timeScale().fitContent();   // encuadrar para que la última vela quede siempre a la vista
     }
   }
   if (C._candles && C._candles.length) updatePriceOverlays(C, st);
