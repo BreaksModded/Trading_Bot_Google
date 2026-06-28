@@ -69,6 +69,7 @@ class OKXExchangeClient:
             self._ex.set_sandbox_mode(True)          # OKX demo/paper trading
             logger.warning("OKX client in DEMO (paper) mode")
         self._patch_fetch_markets()
+        self._apply_ws_host(demo)
 
         self._ccxt_symbol: str | None = None
         self._market: dict[str, Any] | None = None
@@ -103,6 +104,14 @@ class OKXExchangeClient:
             return [m for m in ms if m.get("id") and m.get("symbol")]
 
         self._ex.fetch_markets = _clean
+
+    def _apply_ws_host(self, demo: bool) -> None:
+        """ccxt hardcodes the WS host (ws.okx.com, or wspap.okx.com in demo) and ignores
+        `hostname`. EEA accounts need their own WS hosts or the WS login fails (60032)."""
+        if "eea.okx.com" in (self.hostname or "").lower():
+            ws = "wss://wseeapap.okx.com:8443/ws/v5" if demo else "wss://wseea.okx.com:8443/ws/v5"
+            self._ex.urls["api"]["ws"] = ws
+            logger.info("OKX WS host -> {}", ws)
 
     def _ensure_session(self) -> None:
         """ccxt.pro creates its aiohttp session lazily with the default async DNS
@@ -368,9 +377,21 @@ class OKXExchangeClient:
         ]
 
     async def cancel_all_orders(self, *, symbol: str | None = None) -> None:
+        # ccxt okx has no cancelAllOrders -> fetch open orders and batch-cancel them.
         await self._ensure_market()
         try:
-            await self._ex.cancel_all_orders(self._ccxt_symbol)
+            orders = await self._ex.fetch_open_orders(self._ccxt_symbol)
+            ids = [o["id"] for o in orders if o.get("id")]
+            if not ids:
+                return
+            try:
+                await self._ex.cancel_orders(ids, self._ccxt_symbol)          # batch
+            except Exception:
+                for oid in ids:                                               # fallback: 1x1
+                    try:
+                        await self._ex.cancel_order(oid, self._ccxt_symbol)
+                    except Exception as exc:
+                        logger.warning("OKX cancel_order {}: {}", oid, exc)
         except Exception as exc:
             logger.warning("OKX cancel_all_orders: {}", exc)
 
