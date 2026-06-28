@@ -666,7 +666,7 @@ async def run_bot() -> None:
     exchange = OKXExchangeClient(
         api_key=settings.okx.api_key, api_secret=settings.okx.api_secret,
         passphrase=settings.okx.api_passphrase, demo=settings.okx.demo,
-        symbol=symbol, timeframe=settings.futures.timeframe,
+        symbol=symbol, timeframe=settings.futures.timeframe, hostname=settings.okx.hostname,
     )
     logger.info("BOOT: {} OKX X-Perp, demo={}", symbol, settings.okx.demo)
 

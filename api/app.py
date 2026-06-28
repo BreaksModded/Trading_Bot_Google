@@ -41,6 +41,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         demo=settings.okx.demo,
         symbol=settings.futures.symbol,
         timeframe=settings.futures.timeframe,
+        hostname=settings.okx.hostname,
     )
 
     @asynccontextmanager

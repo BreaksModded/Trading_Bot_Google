@@ -64,6 +64,7 @@ class OKXSettings(BaseSettings):
     api_secret: str = Field(default="", description="OKX API secret")
     api_passphrase: str = Field(default="", description="OKX API passphrase (3rd credential)")
     demo: bool = Field(default=False, description="Use OKX demo (paper) trading")
+    hostname: str = Field(default="eea.okx.com", description="OKX API host — EEA/EU users need eea.okx.com (global: www.okx.com)")
 
 
 # ── Grid Strategy ─────────────────────────────────────────────

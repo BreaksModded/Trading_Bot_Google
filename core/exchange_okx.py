@@ -43,12 +43,13 @@ class OKXExchangeClient:
     def __init__(
         self, *, api_key: str, api_secret: str, passphrase: str, demo: bool = False,
         symbol: str, category: str = "linear", timeframe: str = "60",
-        quote_coin: str = "USDC", **_ignore: Any,
+        quote_coin: str = "USDC", hostname: str = "eea.okx.com", **_ignore: Any,
     ) -> None:
         import ccxt.pro as ccxtpro  # ccxt 4.x ships pro (REST async + WS) in the main pkg
 
         self.api_key = api_key
         self.api_secret = api_secret
+        self.hostname = hostname             # EEA/EU users -> eea.okx.com
         self.symbol = symbol                 # bot symbol, e.g. "ETHUSDT"
         self.category = "linear"
         self.timeframe = timeframe
@@ -57,6 +58,7 @@ class OKXExchangeClient:
 
         self._ex = ccxtpro.okx({
             "apiKey": api_key, "secret": api_secret, "password": passphrase,
+            "hostname": hostname,                    # REST -> https://{hostname} (EEA: eea.okx.com)
             "enableRateLimit": True, "timeout": 30000,
             # We only trade the linear X-Perp (a FUTURE), so restrict market loading to
             # futures: skips the SPOT/SWAP/OPTION endpoints (a concurrent burst OKX was
