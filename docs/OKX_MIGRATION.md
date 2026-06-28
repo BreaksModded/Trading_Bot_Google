@@ -106,9 +106,9 @@ Reinicia. Arranca con tamaño/apalancamiento conservadores y vigila los primeros
 
 ## Notas
 
-- **Host EEA (UE)**: las cuentas europeas usan `eea.okx.com` (no `www.okx.com`), vía
-  `OKX_HOSTNAME`. El WS de demo usa `wspap.okx.com` (paper) automáticamente; para REAL EEA
-  queda por confirmar si el WS necesita un host propio.
+- **Host EEA (UE)**: las cuentas europeas usan `eea.okx.com` para REST (vía `OKX_HOSTNAME`)
+  y hosts WS propios que el cliente fija solo: demo `wseeapap.okx.com`, real `wseea.okx.com`
+  (ccxt ignora `hostname` en el WS). Validado en demo de extremo a extremo (incl. fills WS).
 - **DNS de aiohttp en Windows**: el resolver async por defecto de aiohttp falla en algunos
   Windows (`Could not contact DNS servers`). El cliente fuerza un `ThreadedResolver` solo
   en Windows (para correr el dashboard en local); en Linux (el VPS) no hace nada.
