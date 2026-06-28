@@ -1,11 +1,12 @@
-# 🤖 Bot de Trading de Futuros — Bybit
+# 🤖 Bot de Trading de Futuros — OKX X-Perps
 
-Bot algorítmico **regime-switching** para perpetuos lineales de Bybit (USDT-margined),
-con dashboard web "Editorial" y kill-switch de cuenta.
+Bot algorítmico **regime-switching** para **OKX X-Perps** (futuros lineales con funding,
+conformes a MiCA/MiFID y operables desde la UE), con dashboard web "Editorial" y
+kill-switch de cuenta.
 
 [![Python 3.11+](https://img.shields.io/badge/Python-3.11+-3776AB?logo=python&logoColor=white)](https://python.org)
 [![FastAPI](https://img.shields.io/badge/FastAPI-009688?logo=fastapi&logoColor=white)](https://fastapi.tiangolo.com)
-[![Bybit](https://img.shields.io/badge/Bybit-API_v5_linear-F7A600)](https://bybit.com)
+[![OKX](https://img.shields.io/badge/OKX-X--Perps_via_ccxt-black)](https://okx.com)
 [![Tests](https://img.shields.io/badge/Tests-100_passing-brightgreen)](tests/)
 
 > El bot de **spot** anterior (`main.py`, grid spot) queda como **legacy**. El sistema
@@ -46,7 +47,7 @@ core/
 ├── position_manager.py  # FuturesPositionManager (fills, partner orders del grid)
 ├── futures_risk.py      # kill-switch de cuenta (daily loss + drawdown, anti death-loop)
 ├── indicators.py        # ATR, ADX, EMA, Chandelier Exit
-└── exchange.py          # wrapper Bybit v5 (REST + WebSocket)
+└── exchange_okx.py      # wrapper OKX X-Perps vía ccxt + ccxt.pro (REST + WebSocket)
 main_futures.py          # orquestador del bot de futuros
 api/
 ├── app.py               # FastAPI + sirve los estáticos del dashboard
@@ -83,9 +84,9 @@ python run_dashboard.py    # dashboard → http://localhost:8000
 
 | Variable | Ejemplo | Notas |
 |---|---|---|
-| `BYBIT_API_KEY` / `BYBIT_API_SECRET` | … | clave **mainnet** con permiso **Lectura-Editar + Derivados/Contrato** (NO withdraw) |
-| `BYBIT_TESTNET` | `false` | real (testnet = `true`) |
-| `FUTURES_SYMBOL` | `ETHUSDT` | perpetuo lineal a operar |
+| `OKX_API_KEY` / `OKX_API_SECRET` / `OKX_API_PASSPHRASE` | … | clave OKX con permiso **Leer + Operar** (NO Retirar) + passphrase |
+| `OKX_DEMO` | `true` | demo/paper primero; `false` = real ([docs/OKX_MIGRATION.md](docs/OKX_MIGRATION.md)) |
+| `FUTURES_SYMBOL` | `ETHUSDT` | se resuelve al X-Perp de OKX (`ETH/USD:USD-…`) |
 | `FUTURES_LEVERAGE` | `5` | 1–10 (el bot lo fija al arrancar) |
 | `FUTURES_RISK_PER_TRADE_PCT` | `0.015` | % del equity arriesgado por operación |
 | `FUTURES_MAX_DAILY_LOSS_PCT` | `0.06` | kill-switch diario |
