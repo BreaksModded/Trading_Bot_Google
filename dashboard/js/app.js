@@ -345,6 +345,9 @@ function renderResumen() {
   txt('g-state', risk.halted ? 'DETENIDO' : 'Operando');
   $('g-state').style.color = risk.halted ? '#c8453a' : '#0f7a52';
 
+  // Órdenes activas (escalera del grid en reposo)
+  renderOpenOrders(st);
+
   // Tabla recientes
   renderRecent();
 
@@ -403,6 +406,31 @@ function renderRecent() {
       <td class="r mono">${num(t.qty, 4)}</td>
       <td class="r mono ${pnlClass(t.pnl)}">${signedMoney(t.pnl)}</td>
       <td>${escapeHtml(reasonLabel(m.reason, t.side))}</td></tr>`;
+  }).join('');
+}
+
+/* Órdenes activas: la escalera del grid en reposo (lado/precio/qty/notional/distancia). */
+function renderOpenOrders(st) {
+  const orders = st.open_orders || [];
+  const body = $('tbody-orders');
+  const ref = (st.indicators && st.indicators.price) || (st.grid && st.grid.mid) || 0;
+  if (!orders.length) {
+    body.innerHTML = '<tr class="empty-row"><td colspan="5">Sin órdenes activas.</td></tr>';
+    txt('orders-summary', '—');
+    return;
+  }
+  const total = orders.reduce((a, o) => a + (o.notional || 0), 0);
+  txt('orders-summary', orders.length + ' órdenes · ' + money(total));
+  body.innerHTML = orders.map((o) => {
+    const buy = o.side === 'Buy';
+    const dist = ref ? ((o.price - ref) / ref) * 100 : null;
+    const tp = o.is_partner ? ' <span class="mono" style="color:var(--muted-3);font-size:10px;margin-left:6px">TP</span>' : '';
+    return `<tr>
+      <td><span class="tag ${buy ? 'buy' : 'sell'}">${buy ? 'Compra' : 'Venta'}</span>${tp}</td>
+      <td class="r mono">${money(o.price, priceDp(o.price))}</td>
+      <td class="r mono">${num(o.qty, 4)}</td>
+      <td class="r mono">${money(o.notional)}</td>
+      <td class="r mono">${dist == null ? '—' : signedPct(dist, 2)}</td></tr>`;
   }).join('');
 }
 
