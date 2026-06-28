@@ -54,6 +54,19 @@ class ExchangeSettings(BaseSettings):
         return f"wss://{sub}.{self.domain}.{self.tld}/v5/private"
 
 
+# ── OKX (X-Perps) ─────────────────────────────────────────────
+class OKXSettings(BaseSettings):
+    """OKX connection settings (X-Perps = EU-compliant linear futures with funding)."""
+
+    model_config = SettingsConfigDict(env_prefix="OKX_")
+
+    api_key: str = Field(default="", description="OKX API key")
+    api_secret: str = Field(default="", description="OKX API secret")
+    api_passphrase: str = Field(default="", description="OKX API passphrase (3rd credential)")
+    demo: bool = Field(default=False, description="Use OKX demo (paper) trading")
+    hostname: str = Field(default="eea.okx.com", description="OKX API host — EEA/EU users need eea.okx.com (global: www.okx.com)")
+
+
 # ── Grid Strategy ─────────────────────────────────────────────
 class GridSettings(BaseSettings):
     """Grid trading strategy parameters."""
@@ -694,6 +707,7 @@ class Settings(BaseSettings):
 
     # Sub-settings (each reads its own prefixed env vars)
     exchange: ExchangeSettings = Field(default_factory=ExchangeSettings)
+    okx: OKXSettings = Field(default_factory=OKXSettings)
     grid: GridSettings = Field(default_factory=GridSettings)
     indicators: IndicatorSettings = Field(default_factory=IndicatorSettings)
     risk: RiskSettings = Field(default_factory=RiskSettings)

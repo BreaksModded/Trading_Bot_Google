@@ -19,7 +19,7 @@ from fastapi.staticfiles import StaticFiles
 from loguru import logger
 
 from config.settings import Settings
-from core.exchange import BybitExchangeClient
+from core.exchange_okx import OKXExchangeClient
 from data.database import Database
 
 
@@ -34,14 +34,14 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     db = Database(settings.db_full_path)
     db.init_schema()
 
-    exchange = BybitExchangeClient(
-        api_key=settings.exchange.api_key,
-        api_secret=settings.exchange.api_secret,
-        testnet=settings.exchange.testnet,
-        symbol=settings.active_symbols[0],
-        timeframe="1",
-        domain=settings.exchange.domain,
-        tld=settings.exchange.tld,
+    exchange = OKXExchangeClient(
+        api_key=settings.okx.api_key,
+        api_secret=settings.okx.api_secret,
+        passphrase=settings.okx.api_passphrase,
+        demo=settings.okx.demo,
+        symbol=settings.futures.symbol,
+        timeframe=settings.futures.timeframe,
+        hostname=settings.okx.hostname,
     )
 
     @asynccontextmanager
