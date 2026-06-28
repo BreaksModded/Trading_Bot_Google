@@ -23,7 +23,7 @@ from typing import Any
 from loguru import logger
 
 from config.settings import Settings
-from core.exchange import BybitExchangeClient
+from core.exchange_okx import OKXExchangeClient
 from core.futures_risk import FuturesRiskManager
 from core.grid import build_grid_plan, validate_grid
 from core.indicators import compute_chandelier_exit, enrich_indicators
@@ -40,7 +40,7 @@ class FuturesBot:
     """Regime-switching futures bot for a single linear-perpetual symbol."""
 
     def __init__(
-        self, *, settings: Settings, db: Database, exchange: BybitExchangeClient,
+        self, *, settings: Settings, db: Database, exchange: OKXExchangeClient,
         position_manager: FuturesPositionManager, risk_manager: FuturesRiskManager,
         notifier: TelegramNotifier, health_monitor: HealthMonitor, rules: Any,
     ) -> None:
@@ -663,13 +663,12 @@ async def run_bot() -> None:
     logger.add(_db_log_sink, level="INFO", enqueue=False)
 
     symbol = settings.futures.symbol
-    exchange = BybitExchangeClient(
-        api_key=settings.exchange.api_key, api_secret=settings.exchange.api_secret,
-        testnet=settings.exchange.testnet, symbol=symbol, category="linear",
-        timeframe=settings.futures.timeframe, domain=settings.exchange.domain,
-        tld=settings.exchange.tld,
+    exchange = OKXExchangeClient(
+        api_key=settings.okx.api_key, api_secret=settings.okx.api_secret,
+        passphrase=settings.okx.passphrase, demo=settings.okx.demo,
+        symbol=symbol, timeframe=settings.futures.timeframe,
     )
-    logger.info("BOOT: {} linear perp, testnet={}", symbol, settings.exchange.testnet)
+    logger.info("BOOT: {} OKX X-Perp, demo={}", symbol, settings.okx.demo)
 
     rules = await exchange.get_symbol_rules(symbol)
     pm = FuturesPositionManager(
