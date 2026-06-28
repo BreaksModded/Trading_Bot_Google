@@ -687,21 +687,19 @@ function updatePriceOverlays(C, st) {
     C._stopAt = stopPrice;
   }
 
-  // Rungs del grid (escalera) + banda: recrear SOLO si el grid cambia (firma) → anti-parpadeo.
+  // Zona del grid: techo / centro / suelo (3 líneas claras). No saturamos el gráfico con las
+  // 12 rungs (a 0.4% quedan ilegibles); el detalle por nivel está en la tabla "Órdenes activas".
+  // Recrear SOLO si la zona cambia (firma) → anti-parpadeo.
   const g = st.grid;
-  const gridSig = g ? (g.mid + '|' + g.spacing_pct + '|' + (g.levels || []).length) : '';
+  const gridSig = g ? (g.lower_bound + '|' + g.mid + '|' + g.upper_bound) : '';
   if (gridSig !== C._gridSig) {
     if (C._gridLines) for (const ln of C._gridLines) C.candle.removePriceLine(ln);
     C._gridLines = [];
-    if (g && g.levels) {
-      for (const lv of g.levels) {
-        C._gridLines.push(C.candle.createPriceLine({
-          price: lv.price, color: lv.side === 'Buy' ? '#0f7a52' : '#c8453a',
-          lineWidth: 1, lineStyle: 1, axisLabelVisible: false, title: '',
-        }));
-      }
-      if (g.lower_bound) C._gridLines.push(C.candle.createPriceLine({ price: g.lower_bound, color: '#b3ab98', lineWidth: 1, lineStyle: 2, axisLabelVisible: true, title: 'Banda' }));
-      if (g.upper_bound) C._gridLines.push(C.candle.createPriceLine({ price: g.upper_bound, color: '#b3ab98', lineWidth: 1, lineStyle: 2, axisLabelVisible: true, title: 'Banda' }));
+    if (g) {
+      const add = (price, title, style) => { if (price) C._gridLines.push(C.candle.createPriceLine({ price, color: '#9a9384', lineWidth: 1, lineStyle: style, axisLabelVisible: true, title })); };
+      add(g.upper_bound, 'Techo', 2);
+      add(g.mid, 'Centro', 1);
+      add(g.lower_bound, 'Suelo', 2);
     }
     C._gridSig = gridSig;
   }
