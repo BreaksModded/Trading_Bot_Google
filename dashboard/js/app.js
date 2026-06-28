@@ -672,6 +672,9 @@ function chartTheme(h, interactive) {
     handleScroll: interactive, handleScale: interactive,
   };
 }
+function volData(candles) {   // histograma de volumen, verde/rojo tenue según dirección de la vela
+  return candles.map((c) => ({ time: c.time, value: c.volume || 0, color: c.close >= c.open ? 'rgba(15,122,82,0.35)' : 'rgba(200,69,58,0.35)' }));
+}
 function emaData(candles, period) {
   if (!candles.length) return [];
   const k = 2 / (period + 1); let e = candles[0].close;
@@ -706,6 +709,9 @@ async function ensurePriceChart(hostId, height, tf, st) {
     });
     C.ema50 = chart.addLineSeries({ color: '#16140f', lineWidth: 1, priceLineVisible: false, lastValueVisible: false });
     C.ema200 = chart.addLineSeries({ color: '#c98a2b', lineWidth: 1, lineStyle: 2, priceLineVisible: false, lastValueVisible: false });
+    // Volumen en un subpanel inferior (escala propia 'vol', ~18% de abajo) — no toca la escala de precio.
+    C.vol = chart.addHistogramSeries({ priceFormat: { type: 'volume' }, priceScaleId: 'vol', priceLineVisible: false, lastValueVisible: false });
+    chart.priceScale('vol').applyOptions({ scaleMargins: { top: 0.82, bottom: 0 } });
     window.addEventListener('resize', () => { if (host.clientWidth) chart.applyOptions({ width: host.clientWidth }); });
     // Leyenda OHLC flotante (arriba-izq): la vela bajo el cursor, o la última si no hay cursor.
     host.style.position = 'relative';
@@ -730,6 +736,7 @@ async function ensurePriceChart(hostId, height, tf, st) {
       C.tf = tf; C.loadedSym = sym; C._candles = candles; C._klinesAt = Date.now();
       C._ema50 = emaData(candles, 50); C._ema200 = emaData(candles, 200);
       C.candle.setData(candles); C.ema50.setData(C._ema50); C.ema200.setData(C._ema200);
+      C.vol.setData(volData(candles));
       C.chart.timeScale().fitContent();
     }
   } else if (stale) {
@@ -738,10 +745,11 @@ async function ensurePriceChart(hostId, height, tf, st) {
     const fresh = await loadKlines(sym, tf);
     if (fresh.length) {
       const lastT = C._candles.length ? C._candles[C._candles.length - 1].time : 0;
-      const e50 = emaData(fresh, 50), e200 = emaData(fresh, 200);
+      const e50 = emaData(fresh, 50), e200 = emaData(fresh, 200), vd = volData(fresh);
       for (const b of fresh) if (b.time >= lastT) C.candle.update(b);
       for (const p of e50) if (p.time >= lastT) C.ema50.update(p);
       for (const p of e200) if (p.time >= lastT) C.ema200.update(p);
+      for (const v of vd) if (v.time >= lastT) C.vol.update(v);
       C._candles = fresh; C._ema50 = e50; C._ema200 = e200; C._klinesAt = Date.now();
     }
   }
@@ -810,7 +818,7 @@ async function loadKlines(sym, tf) {
     for (const k of rows) {
       const t = unix(k.timestamp || k.time || k.start);
       if (t == null || seen.has(t)) continue; seen.add(t);
-      out.push({ time: t, open: +k.open, high: +k.high, low: +k.low, close: +k.close });
+      out.push({ time: t, open: +k.open, high: +k.high, low: +k.low, close: +k.close, volume: +(k.volume || 0) });
     }
     out.sort((a, b) => a.time - b.time);
     return out;
