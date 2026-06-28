@@ -62,6 +62,14 @@ OKX_DEMO=true
 ```
 (Comentarios siempre en su propia línea; nunca al final de una línea `KEY=valor`.)
 
+**EEA/UE**: el bot usa `eea.okx.com` por defecto (`OKX_HOSTNAME`). Las cuentas europeas
+viven en esa entidad; apuntar a `www.okx.com` da `50119 "API key doesn't exist"` aunque la
+clave sea válida.
+
+**IP whitelist**: si creaste la clave con IPs permitidas, incluye la **IP del VPS** (si no,
+`50110`). Para probar desde otra máquina, añade su IP o crea la clave sin restricción (en
+demo es seguro, son fondos virtuales).
+
 ### 3. Arrancar y observar
 ```
 git pull
@@ -98,6 +106,9 @@ Reinicia. Arranca con tamaño/apalancamiento conservadores y vigila los primeros
 
 ## Notas
 
+- **Host EEA (UE)**: las cuentas europeas usan `eea.okx.com` (no `www.okx.com`), vía
+  `OKX_HOSTNAME`. El WS de demo usa `wspap.okx.com` (paper) automáticamente; para REAL EEA
+  queda por confirmar si el WS necesita un host propio.
 - **DNS de aiohttp en Windows**: el resolver async por defecto de aiohttp falla en algunos
   Windows (`Could not contact DNS servers`). El cliente fuerza un `ThreadedResolver` solo
   en Windows (para correr el dashboard en local); en Linux (el VPS) no hace nada.
