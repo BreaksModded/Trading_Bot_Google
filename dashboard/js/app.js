@@ -687,6 +687,25 @@ function updatePriceOverlays(C, st) {
     C._stopAt = stopPrice;
   }
 
+  // Rungs del grid (escalera) + banda: recrear SOLO si el grid cambia (firma) → anti-parpadeo.
+  const g = st.grid;
+  const gridSig = g ? (g.mid + '|' + g.spacing_pct + '|' + (g.levels || []).length) : '';
+  if (gridSig !== C._gridSig) {
+    if (C._gridLines) for (const ln of C._gridLines) C.candle.removePriceLine(ln);
+    C._gridLines = [];
+    if (g && g.levels) {
+      for (const lv of g.levels) {
+        C._gridLines.push(C.candle.createPriceLine({
+          price: lv.price, color: lv.side === 'Buy' ? '#0f7a52' : '#c8453a',
+          lineWidth: 1, lineStyle: 1, axisLabelVisible: false, title: '',
+        }));
+      }
+      if (g.lower_bound) C._gridLines.push(C.candle.createPriceLine({ price: g.lower_bound, color: '#b3ab98', lineWidth: 1, lineStyle: 2, axisLabelVisible: true, title: 'Banda' }));
+      if (g.upper_bound) C._gridLines.push(C.candle.createPriceLine({ price: g.upper_bound, color: '#b3ab98', lineWidth: 1, lineStyle: 2, axisLabelVisible: true, title: 'Banda' }));
+    }
+    C._gridSig = gridSig;
+  }
+
   // Marcadores (máx 30, snap a la vela más cercana): re-llamar setMarkers SOLO si cambian.
   const times = C._candles.map((c) => c.time);
   const lo = times[0], hi = times[times.length - 1];
