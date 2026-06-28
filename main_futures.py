@@ -472,6 +472,39 @@ class FuturesBot:
         except Exception as exc:
             logger.debug("persist risk failed: {}", exc)
 
+    def _serialize_open_orders(self) -> list[dict]:
+        """Resting grid orders (the bot's tracked view) for the dashboard ladder."""
+        orders = [
+            {
+                "side": o.side,                       # "Buy" | "Sell"
+                "price": o.price,
+                "qty": o.qty,
+                "notional": o.qty * o.price,
+                "is_partner": o.is_partner,           # True = take-profit leg of a fill
+                "level_id": o.link_id,
+            }
+            for o in self.pm.open_orders
+        ]
+        orders.sort(key=lambda x: x["price"], reverse=True)   # ladder order (high -> low)
+        return orders
+
+    def _serialize_grid(self) -> dict | None:
+        """Current grid plan (rungs, range bounds, SL band) for the chart + hero."""
+        p = self.grid_plan
+        if p is None:
+            return None
+        return {
+            "mid": p.mid,
+            "spacing_pct": p.spacing_pct,
+            "lower_bound": p.lower_bound,
+            "upper_bound": p.upper_bound,
+            "sl_lower": p.stop_loss_lower,
+            "sl_upper": p.stop_loss_upper,
+            "n_per_side": p.n_per_side,
+            "notional_per_level": p.notional_per_level,
+            "levels": [{"price": lv.price, "side": lv.side} for lv in p.levels],
+        }
+
     def _persist_state(self, equity, free, regime, regime_htf=None, ind=None, position=None) -> None:
         try:
             now = datetime.now(UTC)
@@ -508,6 +541,8 @@ class FuturesBot:
                     "liq": position.liq_price, "uPnL": position.unrealized_pnl,
                     "leverage": position.leverage, "margin": position.margin,
                 }
+            blob["open_orders"] = self._serialize_open_orders()
+            blob["grid"] = self._serialize_grid()
             self.db.set_runtime_config("futures_state", blob)
         except Exception as exc:
             logger.debug("persist state failed: {}", exc)
@@ -548,6 +583,8 @@ class FuturesBot:
                 "liq": position.liq_price, "uPnL": position.unrealized_pnl,
                 "leverage": position.leverage, "margin": position.margin,
             }
+            blob["open_orders"] = []      # halted + flat -> no resting orders
+            blob["grid"] = None
             self.db.set_runtime_config("futures_state", blob)
         except Exception as exc:
             logger.debug("persist halted state failed: {}", exc)
