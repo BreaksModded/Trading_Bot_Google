@@ -307,12 +307,14 @@ function renderResumen() {
   txt('kpi-win', stats.win_rate != null ? pct(stats.win_rate, 1) : '—');
   txt('kpi-pf', 'PF ' + pfLabel(stats));
 
-  // Posición / grid (panel estrella adaptativo al modo)
-  const isGrid = !hasPos && st.mode === 'grid' && !!st.grid;
-  show('pos-flat', !hasPos && !isGrid);
+  // Posición / grid (panel estrella adaptativo al modo). En grid mandamos el resumen del
+  // grid SIEMPRE: si una rung dejó posición neta, se muestra como una línea dentro del
+  // resumen (no saltamos al panel de tendencia, que es para direccionales con Chandelier).
+  const isGrid = st.mode === 'grid' && !!st.grid;
   show('pos-grid', isGrid);
-  show('pos-detail', hasPos);
-  txt('pos-side-label', hasPos ? (pos.side === 'long' ? 'LARGO' : 'CORTO') : (isGrid ? 'GRID ACTIVO' : 'SIN POSICIÓN'));
+  show('pos-detail', !isGrid && hasPos);
+  show('pos-flat', !isGrid && !hasPos);
+  txt('pos-side-label', isGrid ? 'GRID ACTIVO' : (hasPos ? (pos.side === 'long' ? 'LARGO' : 'CORTO') : 'SIN POSICIÓN'));
   if (isGrid) renderGridSummary(st);
   if (hasPos) {
     const notional = (pos.size || 0) * (pos.mark || 0);
@@ -455,6 +457,18 @@ function renderGridSummary(st) {
   txt('grid-next', near ? (money(near.price, priceDp(near.price)) + ' · ' + signedPct((near.price - ref) / ref * 100, 2)) : '—');
   txt('grid-band', money(g.lower_bound, priceDp(g.lower_bound)) + ' – ' + money(g.upper_bound, priceDp(g.upper_bound)));
   txt('grid-sl', money(g.sl_lower, priceDp(g.sl_lower)) + ' – ' + money(g.sl_upper, priceDp(g.sl_upper)));
+  // Posición neta: una rung llena deja neto ≠ 0 hasta que su TP la cierra. Se muestra aquí
+  // dentro (sin saltar al panel de tendencia); "Neutral" cuando el grid está equilibrado.
+  const pos = st.position || {};
+  const hasNet = pos.side && pos.side !== 'flat' && Math.abs(pos.size || 0) > 1e-9;
+  const npEl = $('grid-netpos');
+  if (hasNet) {
+    txt('grid-netpos', (pos.side === 'long' ? 'Largo' : 'Corto') + ' ' + num(pos.size, 4) + ' · ' + signedMoney(pos.uPnL || 0));
+    if (npEl) npEl.style.color = (pos.uPnL || 0) >= 0 ? '#3fbf83' : '#e0655c';
+  } else {
+    txt('grid-netpos', 'Neutral');
+    if (npEl) npEl.style.color = '';
+  }
 }
 
 /* ── GRÁFICO ─────────────────────────────────────────────── */
