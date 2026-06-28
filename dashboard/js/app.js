@@ -307,9 +307,13 @@ function renderResumen() {
   txt('kpi-win', stats.win_rate != null ? pct(stats.win_rate, 1) : '—');
   txt('kpi-pf', 'PF ' + pfLabel(stats));
 
-  // Posición
-  show('pos-flat', !hasPos); show('pos-detail', hasPos);
-  txt('pos-side-label', hasPos ? (pos.side === 'long' ? 'LARGO' : 'CORTO') : 'SIN POSICIÓN');
+  // Posición / grid (panel estrella adaptativo al modo)
+  const isGrid = !hasPos && st.mode === 'grid' && !!st.grid;
+  show('pos-flat', !hasPos && !isGrid);
+  show('pos-grid', isGrid);
+  show('pos-detail', hasPos);
+  txt('pos-side-label', hasPos ? (pos.side === 'long' ? 'LARGO' : 'CORTO') : (isGrid ? 'GRID ACTIVO' : 'SIN POSICIÓN'));
+  if (isGrid) renderGridSummary(st);
   if (hasPos) {
     const notional = (pos.size || 0) * (pos.mark || 0);
     txt('pos-side', pos.side === 'long' ? 'Largo' : 'Corto');
@@ -432,6 +436,25 @@ function renderOpenOrders(st) {
       <td class="r mono">${money(o.notional)}</td>
       <td class="r mono">${dist == null ? '—' : signedPct(dist, 2)}</td></tr>`;
   }).join('');
+}
+
+/* Resumen del grid para el panel estrella cuando el bot está en modo grid. */
+function renderGridSummary(st) {
+  const g = st.grid || {}, orders = st.open_orders || [];
+  const ref = (st.indicators && st.indicators.price) || g.mid || 0;
+  const buys = orders.filter((o) => o.side === 'Buy').length;
+  const sells = orders.filter((o) => o.side === 'Sell').length;
+  const total = orders.reduce((a, o) => a + (o.notional || 0), 0);
+  txt('grid-mid', money(g.mid, priceDp(g.mid)));
+  txt('grid-buys', String(buys));
+  txt('grid-sells', String(sells));
+  txt('grid-notional', money(total));
+  txt('grid-spacing', num((g.spacing_pct || 0) * 100, 2) + '%');
+  let near = null, nd = Infinity;
+  for (const o of orders) { const d = Math.abs(o.price - ref); if (d < nd) { nd = d; near = o; } }
+  txt('grid-next', near ? (money(near.price, priceDp(near.price)) + ' · ' + signedPct((near.price - ref) / ref * 100, 2)) : '—');
+  txt('grid-band', money(g.lower_bound, priceDp(g.lower_bound)) + ' – ' + money(g.upper_bound, priceDp(g.upper_bound)));
+  txt('grid-sl', money(g.sl_lower, priceDp(g.sl_lower)) + ' – ' + money(g.sl_upper, priceDp(g.sl_upper)));
 }
 
 /* ── GRÁFICO ─────────────────────────────────────────────── */
