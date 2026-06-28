@@ -637,13 +637,24 @@ function gauge(id, val, limit, footWord) {
 }
 
 /* ── Gráficos (Lightweight Charts) ───────────────────────── */
+// Formatters de hora LOCAL del navegador (los timestamps siguen en UTC por dentro; solo
+// cambia el display, para que cuadre con el reloj del usuario en vez de mostrar UTC).
+function fmtChartTime(t) {   // crosshair (completo): "28 jun, 23:00"
+  return new Date(t * 1000).toLocaleString('es-ES', { day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit', hour12: false });
+}
+function fmtChartTick(t, type) {   // eje: fecha en límites de día, HH:MM intradía
+  const d = new Date(t * 1000);
+  if (type != null && type < 3) return d.toLocaleDateString('es-ES', { day: '2-digit', month: 'short' });
+  return String(d.getHours()).padStart(2, '0') + ':' + String(d.getMinutes()).padStart(2, '0');
+}
 function chartTheme(h, interactive) {
   return {
     height: h,
     layout: { background: { color: '#ffffff' }, textColor: '#9a9384', fontFamily: "'IBM Plex Mono', monospace", fontSize: 10 },
+    localization: { locale: 'es-ES', timeFormatter: fmtChartTime },
     grid: { vertLines: { color: '#f4f0e7' }, horzLines: { color: '#f4f0e7' } },
     rightPriceScale: { borderColor: '#e2ddd0', scaleMargins: { top: 0.12, bottom: 0.12 } },
-    timeScale: { borderColor: '#e2ddd0', timeVisible: true, secondsVisible: false, rightOffset: 6 },
+    timeScale: { borderColor: '#e2ddd0', timeVisible: true, secondsVisible: false, rightOffset: 6, tickMarkFormatter: fmtChartTick },
     crosshair: { mode: 0, vertLine: { color: '#cabfa8', width: 1, style: 2, labelBackgroundColor: '#16140f' }, horzLine: { color: '#cabfa8', width: 1, style: 2, labelBackgroundColor: '#16140f' } },
     handleScroll: interactive, handleScale: interactive,
   };
