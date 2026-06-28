@@ -62,7 +62,7 @@ class OKXSettings(BaseSettings):
 
     api_key: str = Field(default="", description="OKX API key")
     api_secret: str = Field(default="", description="OKX API secret")
-    passphrase: str = Field(default="", description="OKX API passphrase (3rd credential)")
+    api_passphrase: str = Field(default="", description="OKX API passphrase (3rd credential)")
     demo: bool = Field(default=False, description="Use OKX demo (paper) trading")
 
 

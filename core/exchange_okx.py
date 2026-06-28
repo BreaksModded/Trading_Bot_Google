@@ -66,6 +66,7 @@ class OKXExchangeClient:
         if demo:
             self._ex.set_sandbox_mode(True)          # OKX demo/paper trading
             logger.warning("OKX client in DEMO (paper) mode")
+        self._patch_fetch_markets()
 
         self._ccxt_symbol: str | None = None
         self._market: dict[str, Any] | None = None
@@ -89,6 +90,17 @@ class OKXExchangeClient:
             if s.endswith(q):
                 return s[: -len(q)]
         return s
+
+    def _patch_fetch_markets(self) -> None:
+        """OKX demo returns a malformed instrument (id=None, symbol=None) that crashes
+        ccxt's set_markets keysort. Filter such entries at the source (no-op in real)."""
+        orig = self._ex.fetch_markets
+
+        async def _clean(params={}):
+            ms = await orig(params)
+            return [m for m in ms if m.get("id") and m.get("symbol")]
+
+        self._ex.fetch_markets = _clean
 
     def _ensure_session(self) -> None:
         """ccxt.pro creates its aiohttp session lazily with the default async DNS
@@ -333,6 +345,25 @@ class OKXExchangeClient:
         if not oid:
             raise ExchangeError(f"OKX limit order rejected: {o}")
         return str(oid)
+
+    async def get_open_orders(self, *, symbol: str | None = None) -> list[dict[str, Any]]:
+        """Open orders in the Bybit shape sync_orders expects (it reads 'orderId')."""
+        await self._ensure_market()
+        try:
+            orders = await self._ex.fetch_open_orders(self._ccxt_symbol)
+        except Exception as exc:
+            logger.warning("OKX fetch_open_orders: {}", exc)
+            return []
+        return [
+            {
+                "orderId": str(o.get("id") or ""),
+                "orderLinkId": str(o.get("clientOrderId") or ""),
+                "side": "Buy" if o.get("side") == "buy" else "Sell",
+                "price": float(o.get("price") or 0.0),
+                "qty": float(o.get("amount") or 0.0) * self._contract_size,
+            }
+            for o in (orders or [])
+        ]
 
     async def cancel_all_orders(self, *, symbol: str | None = None) -> None:
         await self._ensure_market()
