@@ -647,6 +647,19 @@ function fmtChartTick(t, type) {   // eje: fecha en límites de día, HH:MM intr
   if (type != null && type < 3) return d.toLocaleDateString('es-ES', { day: '2-digit', month: 'short' });
   return String(d.getHours()).padStart(2, '0') + ':' + String(d.getMinutes()).padStart(2, '0');
 }
+function ohlcLegendHTML(c, t) {   // leyenda OHLC de una vela (estilo Editorial)
+  const dp = priceDp(c.close), f = (v) => (+v).toFixed(dp);
+  const chg = c.open ? (c.close - c.open) / c.open * 100 : 0;
+  const col = chg >= 0 ? '#0f7a52' : '#c8453a';
+  const L = (s) => `<span style="color:#9a9384">${s}</span>`;
+  return `${L('Apert')} ${f(c.open)}  ${L('Máx')} ${f(c.high)}  ${L('Mín')} ${f(c.low)}  ${L('Cierre')} ${f(c.close)}  <span style="color:${col}">${chg >= 0 ? '+' : ''}${chg.toFixed(2)}%</span>  ${L(fmtChartTime(t))}`;
+}
+function updateChartLegend(C) {   // por defecto / tras refresco: la última vela
+  if (C.legend && C._candles && C._candles.length) {
+    const c = C._candles[C._candles.length - 1];
+    C.legend.innerHTML = ohlcLegendHTML(c, c.time);
+  }
+}
 function chartTheme(h, interactive) {
   return {
     height: h,
@@ -694,6 +707,17 @@ async function ensurePriceChart(hostId, height, tf, st) {
     C.ema50 = chart.addLineSeries({ color: '#16140f', lineWidth: 1, priceLineVisible: false, lastValueVisible: false });
     C.ema200 = chart.addLineSeries({ color: '#c98a2b', lineWidth: 1, lineStyle: 2, priceLineVisible: false, lastValueVisible: false });
     window.addEventListener('resize', () => { if (host.clientWidth) chart.applyOptions({ width: host.clientWidth }); });
+    // Leyenda OHLC flotante (arriba-izq): la vela bajo el cursor, o la última si no hay cursor.
+    host.style.position = 'relative';
+    C.legend = document.createElement('div');
+    C.legend.style.cssText = 'position:absolute;top:8px;left:12px;z-index:3;font-family:"IBM Plex Mono",monospace;font-size:11px;color:#16140f;pointer-events:none;white-space:nowrap';
+    host.appendChild(C.legend);
+    chart.subscribeCrosshairMove((p) => {
+      let c = null, t = null;
+      if (p && p.time && p.seriesData) { const d = p.seriesData.get(C.candle); if (d && d.open != null) { c = d; t = p.time; } }
+      if (!c && C._candles.length) { c = C._candles[C._candles.length - 1]; t = c.time; }
+      C.legend.innerHTML = c ? ohlcLegendHTML(c, t) : '';
+    });
   }
   C.chart.applyOptions({ width: host.clientWidth || 600 });
   const sym = st.symbol;
@@ -721,7 +745,7 @@ async function ensurePriceChart(hostId, height, tf, st) {
       C._candles = fresh; C._ema50 = e50; C._ema200 = e200; C._klinesAt = Date.now();
     }
   }
-  if (C._candles && C._candles.length) updatePriceOverlays(C, st);
+  if (C._candles && C._candles.length) { updateChartLegend(C); updatePriceOverlays(C, st); }
 }
 function updatePriceOverlays(C, st) {
   if (!C._candles || !C._candles.length) return;
