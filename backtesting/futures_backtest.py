@@ -108,6 +108,7 @@ class FuturesTrendBacktest:
         fees_total = funding_total = 0.0
         peak = equity; max_dd = 0.0
         regime_counts: dict = {}
+        prev_regime = MarketRegime.TRANSITIONAL   # hysteresis state (audit H4)
 
         for i in range(warmup, len(df)):
             close = float(close_a[i]); high = float(high_a[i]); low = float(low_a[i])
@@ -115,7 +116,9 @@ class FuturesTrendBacktest:
             regime = classify_futures_regime(
                 float(adx_a[i]), float(ef_a[i]), float(es_a[i]),
                 adx_trend=s.adx_trend_threshold, adx_range=s.adx_range_threshold,
+                current=prev_regime,   # hysteresis: same sticky behaviour as live
             )
+            prev_regime = regime
             regime_htf = htf_reg[i]
             regime_counts[regime] = regime_counts.get(regime, 0) + 1
             cl = float(cl_a[i]); cs = float(cs_a[i])

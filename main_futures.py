@@ -197,6 +197,7 @@ class FuturesBot:
         regime = classify_futures_regime(
             ind["adx"], ind["ema_fast"], ind["ema_slow"],
             adx_trend=self.s.adx_trend_threshold, adx_range=self.s.adx_range_threshold,
+            current=self._last_regime,   # hysteresis: stay sticky near the ADX threshold
         )
         regime_htf = self._htf_regime(kl_htf)
         price = ind["close"]                      # last CLOSED candle (stable signals)
