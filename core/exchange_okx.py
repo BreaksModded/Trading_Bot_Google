@@ -312,6 +312,33 @@ class OKXExchangeClient:
             "margin": float(pos.get("initialMargin") or pos.get("collateral") or 0.0),
         }
 
+    async def get_realized_pnl_since(self, *, symbol: str, since_ms: int) -> tuple[float, float]:
+        """Realized PnL + avg close price from OKX fills since `since_ms`. Used to record a
+        position the exchange-side stop closed: the opening fill has fillPnl 0, the closing
+        fills carry the realized PnL. Best-effort -> (0.0, 0.0) on failure."""
+        await self._ensure_market()
+        try:
+            fills = await self._ex.fetch_my_trades(self._ccxt_symbol, since=since_ms, limit=100)
+        except Exception as exc:
+            logger.warning("OKX fetch_my_trades: {}", exc)
+            return 0.0, 0.0
+        pnl = 0.0
+        px_num = 0.0
+        px_den = 0.0
+        for t in (fills or []):
+            info = t.get("info") or {}
+            raw = info.get("fillPnl") or info.get("pnl")
+            if raw in (None, ""):
+                continue
+            fp = float(raw)
+            if fp == 0.0:        # opening fills -> no realized PnL; skip
+                continue
+            pnl += fp
+            amt = float(t.get("amount") or 0.0)
+            px_num += float(t.get("price") or 0.0) * amt
+            px_den += amt
+        return pnl, (px_num / px_den if px_den else 0.0)
+
     async def place_market_linear(
         self, *, symbol: str, side: str, qty: float, reduce_only: bool = False,
     ) -> str:

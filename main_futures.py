@@ -58,6 +58,9 @@ class FuturesBot:
 
         self.mode = "flat"            # flat | grid | trend
         self.trend_stop: TrendStop | None = None
+        # Trend position the bot is holding (set on entry, cleared on bot-initiated close).
+        # Lets us detect + record a position closed by the EXCHANGE-side stop between cycles.
+        self._open_trade: dict | None = None
         self.grid_plan = None
         self.running = True
         self._shutdown = asyncio.Event()
@@ -108,6 +111,11 @@ class FuturesBot:
                     side="Buy" if pos0.side == "long" else "Sell", stop_price=float(ts0),
                 )
                 self.mode = "trend"
+                self._open_trade = {
+                    "side": "Buy" if pos0.side == "long" else "Sell", "size": pos0.size,
+                    "entry_price": pos0.entry_price,
+                    "entry_ms": int(datetime.now(UTC).timestamp() * 1000),
+                }
                 logger.info("Recovered trend {} position, stop={:.4f}", pos0.side, ts0)
         except Exception as exc:
             logger.warning("trend recovery failed: {}", exc)
@@ -205,6 +213,8 @@ class FuturesBot:
             self.mode, position.side, equity,
         )
 
+        # Record any position the exchange-side stop closed since the last cycle (audit H1).
+        await self._reconcile_external_close(position)
         self._last_regime = regime.value
         if regime in (MarketRegime.TRENDING_UP, MarketRegime.TRENDING_DOWN):
             await self._handle_trend(regime, regime_htf, ind, live_price, position, equity, free)
@@ -275,6 +285,11 @@ class FuturesBot:
                 order_type="Market", exchange_order_id=None,
                 metadata={"reason": "trend_entry", "regime": self._last_regime},
             ))
+            self._open_trade = {
+                "side": decision.side, "size": opened.size,
+                "entry_price": opened.entry_price or live_price,
+                "entry_ms": int(now.timestamp() * 1000),
+            }
         elif decision.action == "close":
             await self._close_position(position, decision.reason)
         elif decision.action == "hold":
@@ -419,6 +434,43 @@ class FuturesBot:
         self.mode = "flat"
         self.trend_stop = None
         self._exchange_sl = None
+        self._open_trade = None   # bot-initiated close already recorded above
+
+    async def _reconcile_external_close(self, position) -> None:
+        """Record a trend position closed by the EXCHANGE-side stop between cycles.
+
+        The exchange stop (real-time) fires faster than the ~10s loop, so the bot never
+        calls _close_position and the realized loss/gain goes off-book (audit H1: the
+        dashboard showed 'PnL realizado ~$0' while equity fell). Detect: we were holding
+        a trend position (`_open_trade`) but it is now flat -> pull the realized PnL from
+        the OKX fills since entry and record the close."""
+        ot = self._open_trade
+        if not ot or not position.is_flat:
+            return
+        try:
+            realized, close_px = await self.exchange.get_realized_pnl_since(
+                symbol=self.symbol, since_ms=ot["entry_ms"],
+            )
+        except Exception as exc:
+            logger.warning("reconcile: realized-pnl fetch failed: {}", exc)
+            realized, close_px = 0.0, 0.0
+        close_side = "Buy" if ot["side"] == "Sell" else "Sell"
+        await self._log("INFO", "trend",
+                        f"closed by exchange stop: {ot['side']} {ot['size']} -> realized {realized:.2f}")
+        try:
+            await asyncio.to_thread(self.db.insert_trade, TradeRecord(
+                timestamp=datetime.now(UTC), side=close_side,
+                price=close_px or ot["entry_price"], qty=ot["size"],
+                fee=0.0, pnl=realized, status="filled", symbol=self.symbol,
+                order_type="Market", exchange_order_id=None,
+                metadata={"reason": "trend_stop_exch", "regime": self._last_regime},
+            ))
+        except Exception as exc:
+            logger.error("reconcile: insert close trade failed: {}", exc)
+        self._open_trade = None
+        self.trend_stop = None
+        if self.mode == "trend":
+            self.mode = "flat"
 
     # ── Indicators ────────────────────────────────────────────────────
 
