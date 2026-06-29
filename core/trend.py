@@ -87,9 +87,9 @@ def compute_fixed_fractional_qty(
 ) -> float:
     """Position size so that hitting ``stop_price`` loses ``risk_pct`` of equity.
 
-    qty = (equity * risk_pct) / |entry - stop|, capped so the notional never
-    exceeds available_margin * leverage, then rounded DOWN to the qty step.
-    Returns 0.0 if the result is below the exchange minimum (caller skips).
+    qty = (equity * risk_pct) / |entry - stop|, capped so the notional never exceeds
+    90% of available_margin * leverage (safety buffer for fees), then rounded DOWN to
+    the step. Returns 0.0 if the result is below the exchange minimum (caller skips).
     """
     stop_dist = abs(entry_price - stop_price)
     if stop_dist <= 0 or entry_price <= 0 or equity <= 0 or risk_pct <= 0:
@@ -97,8 +97,10 @@ def compute_fixed_fractional_qty(
 
     qty = (equity * risk_pct) / stop_dist
 
+    # 10% safety buffer: sizing to 100% of free margin gets rejected by OKX (51008) on
+    # fees/slippage between sizing and fill (audit H3).
     if available_margin > 0 and leverage > 0:
-        qty = min(qty, (available_margin * leverage) / entry_price)
+        qty = min(qty, (available_margin * leverage * 0.90) / entry_price)
 
     qty = _round_down(qty, qty_step)
     return qty if qty >= float(min_qty) else 0.0
