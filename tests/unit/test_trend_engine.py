@@ -50,6 +50,29 @@ def test_decide_hold_above_stop():
     assert d.action == "hold" and d.stop.stop_price == 1950.0
 
 
+# ── F1: reject entries whose stop has no room on the correct side ─────
+
+
+def test_decide_skips_short_when_stop_at_or_below_entry():
+    # Live price spiked ABOVE the closed-candle short stop -> stop sits below the live
+    # entry -> instant stop-out. The bot must stand aside, not short into the spike.
+    d = _decide(regime=MarketRegime.TRENDING_DOWN, regime_htf=MarketRegime.TRENDING_DOWN,
+                live_price=2000.0, chandelier_short=1999.0)
+    assert d.action == "none" and d.reason == "stop_too_close"
+
+
+def test_decide_skips_long_when_stop_too_close():
+    # Long stop only 0.05% below the entry -> below the 0.15% floor -> rejected (it would
+    # also blow the fixed-fractional size up on the razor-thin distance).
+    d = _decide(live_price=2000.0, chandelier_long=1999.0)
+    assert d.action == "none" and d.reason == "stop_too_close"
+
+
+def test_decide_enters_when_stop_has_room():
+    # Default setup: long stop 1950 = 2.5% below entry 2000 -> ample room -> still enters.
+    assert _decide().action == "enter"
+
+
 # ── Entry ─────────────────────────────────────────────────────────────
 
 

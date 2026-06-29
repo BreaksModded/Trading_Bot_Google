@@ -134,12 +134,17 @@ def decide_trend(
     require_htf: bool,
     qty_step: Decimal,
     min_qty: Decimal,
+    min_stop_dist_pct: float = 0.0015,
 ) -> TrendDecision:
     """The SHARED trend decision used by both the live bot and the backtest, so
     they cannot drift. Assumes ``regime`` is TRENDING_UP/DOWN (caller dispatches).
 
     Returns what to do (enter/hold/close/none); the caller performs the I/O
     (live: real orders; backtest: simulated fills).
+
+    ``min_stop_dist_pct`` is a safety floor: a fresh entry whose Chandelier stop is on
+    the wrong side of the live price, or closer than this fraction of it, is rejected
+    (the entry guard below) — it would be an instant stop-out.
     """
     desired_side = "Buy" if regime == MarketRegime.TRENDING_UP else "Sell"
     desired_pos = "long" if desired_side == "Buy" else "short"
@@ -153,6 +158,14 @@ def decide_trend(
         stop = initial_trend_stop(
             entry.side, chandelier_long=chandelier_long, chandelier_short=chandelier_short,
         )
+        # F1 guard: the Chandelier stop comes from CLOSED candles but entries fill at the
+        # LIVE price. On a fast intrabar move the live price can run THROUGH that stop, so a
+        # short's stop sits at/below entry (or a long's at/above): entering would be an
+        # instant stop-out, OKX rejects the SL (51278), and the razor-thin stop distance
+        # maxes out the fixed-fractional size. Require real room on the correct side.
+        room = (stop.stop_price - live_price) if entry.side == "Sell" else (live_price - stop.stop_price)
+        if room < live_price * min_stop_dist_pct:
+            return TrendDecision("none", reason="stop_too_close")
         qty = compute_fixed_fractional_qty(
             equity=equity, risk_pct=risk_pct, entry_price=live_price,
             stop_price=stop.stop_price, qty_step=qty_step, min_qty=min_qty,
