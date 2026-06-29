@@ -71,3 +71,24 @@ def test_translate_partial_fill(client):
 
 def test_translate_unfilled_order_is_skipped(client):
     assert client._translate_order({"id": "abc", "status": "open", "filled": 0.0, "info": {}}) is None
+
+
+# ── Realized PnL + fee netting (audit F4) ──────────────────────────────
+
+
+async def test_realized_pnl_since_nets_fees(client):
+    from unittest.mock import AsyncMock
+
+    client._ensure_market = AsyncMock()
+    client._ccxt_symbol = "ETH/USD:USD-310404"
+    client._ex = AsyncMock()
+    client._ex.fetch_my_trades = AsyncMock(return_value=[
+        # opening fill: realized 0 but a real taker fee
+        {"price": 1580.0, "amount": 0.4, "fee": {"cost": 0.35}, "info": {"fillPnl": "0"}},
+        # closing fill: gross realized -2.0 and its own fee
+        {"price": 1590.0, "amount": 0.4, "fee": {"cost": 0.35}, "info": {"fillPnl": "-2.0"}},
+    ])
+    net, px, fee = await client.get_realized_pnl_since(symbol="ETHUSDT", since_ms=1)
+    assert fee == pytest.approx(0.70)     # fees from BOTH fills (open + close)
+    assert net == pytest.approx(-2.70)    # gross -2.0 minus 0.70 in fees
+    assert px == pytest.approx(1590.0)    # price weights only the realizing (close) fill

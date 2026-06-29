@@ -315,32 +315,45 @@ class OKXExchangeClient:
             "margin": float(pos.get("collateral") or pos.get("initialMargin") or 0.0),
         }
 
-    async def get_realized_pnl_since(self, *, symbol: str, since_ms: int) -> tuple[float, float]:
-        """Realized PnL + avg close price from OKX fills since `since_ms`. Used to record a
-        position the exchange-side stop closed: the opening fill has fillPnl 0, the closing
-        fills carry the realized PnL. Best-effort -> (0.0, 0.0) on failure."""
+    async def get_realized_pnl_since(self, *, symbol: str, since_ms: int) -> tuple[float, float, float]:
+        """Net realized PnL, avg close price, and total fees from OKX fills since `since_ms`.
+
+        Opening fills carry fillPnl 0 but still a taker fee; closing fills carry the realized
+        PnL. Returns NET realized (gross fillPnl - fees) so the recorded close reconciles with
+        the equity change, plus the fee magnitude for display. Best-effort -> (0, 0, 0) on
+        failure. (audit F4: fees were booked as 0, so the dashboard PnL drifted from equity.)"""
         await self._ensure_market()
         try:
             fills = await self._ex.fetch_my_trades(self._ccxt_symbol, since=since_ms, limit=100)
         except Exception as exc:
             logger.warning("OKX fetch_my_trades: {}", exc)
-            return 0.0, 0.0
-        pnl = 0.0
+            return 0.0, 0.0, 0.0
+        gross = 0.0
+        fee_total = 0.0
         px_num = 0.0
         px_den = 0.0
         for t in (fills or []):
+            cost = (t.get("fee") or {}).get("cost")
+            if cost is not None:
+                try:
+                    fee_total += abs(float(cost))
+                except (TypeError, ValueError):
+                    pass
             info = t.get("info") or {}
             raw = info.get("fillPnl") or info.get("pnl")
             if raw in (None, ""):
                 continue
-            fp = float(raw)
-            if fp == 0.0:        # opening fills -> no realized PnL; skip
+            try:
+                fp = float(raw)
+            except (TypeError, ValueError):
                 continue
-            pnl += fp
+            if fp == 0.0:        # opening fill: fee counted above, no realized PnL
+                continue
+            gross += fp
             amt = float(t.get("amount") or 0.0)
             px_num += float(t.get("price") or 0.0) * amt
             px_den += amt
-        return pnl, (px_num / px_den if px_den else 0.0)
+        return gross - fee_total, (px_num / px_den if px_den else 0.0), fee_total
 
     async def place_market_linear(
         self, *, symbol: str, side: str, qty: float, reduce_only: bool = False,

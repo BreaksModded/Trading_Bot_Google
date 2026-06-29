@@ -35,6 +35,11 @@ from data.models import BotStatus, CircuitBreakerEvent, EventLogRecord, TradeRec
 from services.health_monitor import HealthMonitor
 from services.notifier import TelegramNotifier
 
+# OKX USDC-perp taker fee. Used to book the round-trip fee on bot-initiated closes so the
+# dashboard's realized PnL reconciles with real equity (audit F4); exchange-side stop-outs
+# read the real per-fill fee from OKX instead.
+TAKER_FEE_RATE = 0.0005
+
 
 class FuturesBot:
     """Regime-switching futures bot for a single linear-perpetual symbol."""
@@ -418,15 +423,19 @@ class FuturesBot:
             await self.exchange.place_market_linear(
                 symbol=self.symbol, side=close_side, qty=position.size, reduce_only=True,
             )
+            # Book the round-trip taker fee (entry + exit). uPnL is gross & pre-fee, so
+            # recording fee=0 made the dashboard's realized PnL drift far from real equity
+            # (audit F4). Estimate it deterministically — no fill-timing race on the order
+            # just placed; the exchange-stop path reads the real per-fill fee instead.
+            entry_px = (self._open_trade or {}).get("entry_price") or position.mark_price
+            fee = TAKER_FEE_RATE * position.size * (entry_px + position.mark_price)
+            pnl = position.unrealized_pnl - fee
             await self._log("INFO", "trend",
                             f"CLOSE {position.side} {position.size} ({reason}) "
-                            f"uPnL={position.unrealized_pnl:.2f}")
-            # Record the close so the loss/gain is NEVER off-book (audit H1).
-            # Realized PnL ~ uPnL at market close; the accounting phase refines it
-            # via the closed-pnl endpoint.
+                            f"uPnL={position.unrealized_pnl:.2f} fee={fee:.2f} net={pnl:.2f}")
             await asyncio.to_thread(self.db.insert_trade, TradeRecord(
                 timestamp=datetime.now(UTC), side=close_side, price=position.mark_price,
-                qty=position.size, fee=0.0, pnl=position.unrealized_pnl, status="filled",
+                qty=position.size, fee=fee, pnl=pnl, status="filled",
                 symbol=self.symbol, order_type="Market", exchange_order_id=None,
                 metadata={"reason": reason, "regime": self._last_regime},
             ))
@@ -452,20 +461,21 @@ class FuturesBot:
         if not ot or not position.is_flat:
             return
         try:
-            realized, close_px = await self.exchange.get_realized_pnl_since(
+            realized, close_px, fee = await self.exchange.get_realized_pnl_since(
                 symbol=self.symbol, since_ms=ot["entry_ms"],
             )
         except Exception as exc:
             logger.warning("reconcile: realized-pnl fetch failed: {}", exc)
-            realized, close_px = 0.0, 0.0
+            realized, close_px, fee = 0.0, 0.0, 0.0
         close_side = "Buy" if ot["side"] == "Sell" else "Sell"
         await self._log("INFO", "trend",
-                        f"closed by exchange stop: {ot['side']} {ot['size']} -> realized {realized:.2f}")
+                        f"closed by exchange stop: {ot['side']} {ot['size']} -> "
+                        f"realized {realized:.2f} (fee {fee:.2f})")
         try:
             await asyncio.to_thread(self.db.insert_trade, TradeRecord(
                 timestamp=datetime.now(UTC), side=close_side,
                 price=close_px or ot["entry_price"], qty=ot["size"],
-                fee=0.0, pnl=realized, status="filled", symbol=self.symbol,
+                fee=fee, pnl=realized, status="filled", symbol=self.symbol,
                 order_type="Market", exchange_order_id=None,
                 metadata={"reason": "trend_stop_exch", "regime": self._last_regime},
             ))
