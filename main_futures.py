@@ -435,6 +435,9 @@ class FuturesBot:
         self.mode = "flat"
         self.trend_stop = None
         self._exchange_sl = None
+        if reason == "chandelier_stop":  # F2: cool down after a stop-out so a fast move
+            # cannot trigger an immediate re-entry -> stop-out -> re-entry churn loop.
+            self._entry_cooldown_until = datetime.now(UTC) + timedelta(seconds=self._entry_cooldown_s)
         self._open_trade = None   # bot-initiated close already recorded above
 
     async def _reconcile_external_close(self, position) -> None:
@@ -470,6 +473,8 @@ class FuturesBot:
             logger.error("reconcile: insert close trade failed: {}", exc)
         self._open_trade = None
         self.trend_stop = None
+        # F2: cool down after an exchange stop-out, same as a bot-initiated stop close.
+        self._entry_cooldown_until = datetime.now(UTC) + timedelta(seconds=self._entry_cooldown_s)
         if self.mode == "trend":
             self.mode = "flat"
 

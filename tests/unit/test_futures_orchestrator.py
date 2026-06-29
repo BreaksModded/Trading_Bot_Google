@@ -140,6 +140,19 @@ async def test_reversal_closes_position():
     assert bot.mode == "flat"
 
 
+async def test_stop_out_sets_reentry_cooldown():
+    # After a Chandelier stop-out the bot must cool down (F2), so a fast move cannot
+    # trigger an immediate re-entry -> stop-out -> re-entry churn loop.
+    bot, ex, _ = _bot()
+    pos = _pos(side="long", size=0.045, entry=2000, mark=1940)
+    bot._open_trade = {"side": "Buy", "size": 0.045, "entry_price": 2000.0, "entry_ms": 1}
+    await bot._handle_trend(MarketRegime.TRENDING_UP, MarketRegime.TRENDING_UP,
+                            _ind(cl=1950.0), live_price=1940.0, position=pos,
+                            equity=150.0, free=150.0)
+    assert bot.mode == "flat"
+    assert bot._entry_cooldown_until is not None and bot._entry_cooldown_until > datetime.now(UTC)
+
+
 # ── Range / grid ───────────────────────────────────────────────────────
 
 
