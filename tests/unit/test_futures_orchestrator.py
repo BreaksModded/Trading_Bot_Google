@@ -181,6 +181,17 @@ async def test_grid_atr_band_breach_flattens():
     assert bot.mode == "flat"
 
 
+async def test_resume_command_clears_paused_status():
+    # After a manual resume the bot must flip bot_state back to RUNNING, else the dashboard
+    # chip keeps showing 'Pausado · kill-switch' while the bot is actually running.
+    from data.models import BotStatus
+    bot, ex, _ = _bot()
+    ex.get_portfolio_equity = AsyncMock(return_value=(150.0, 150.0, 0.0))
+    bot.db.fetch_pending_commands = MagicMock(return_value=[{"id": 1, "command": "resume"}])
+    await bot._process_commands()
+    bot.db.update_bot_state.assert_any_call(status=BotStatus.RUNNING, message="resumed")
+
+
 async def test_transitional_flattens_when_holding_orders():
     bot, ex, pm = _bot()
     bot.mode = "grid"

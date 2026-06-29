@@ -673,6 +673,10 @@ class FuturesBot:
                         symbols=[self.symbol], quote_coin=self.quote,
                     )
                     self.risk.resume(equity)
+                    # Clear the kill-switch PAUSED status. The dashboard chip ('Pausado ·
+                    # kill-switch') reads bot.status, which was flipped to PAUSED on halt but
+                    # never back on resume -> it showed paused while the bot was running.
+                    self.db.update_bot_state(status=BotStatus.RUNNING, message="resumed")
                     await self._log("INFO", "risk", f"manual resume — peak rebased to {equity:.2f}")
                 elif action in ("flatten", "emergency"):
                     await self._flatten_all("manual_flatten")
