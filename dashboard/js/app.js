@@ -302,7 +302,7 @@ function renderResumen() {
   txt('kpi-pnl', signedMoney(stats.total_pnl)); applyClass('kpi-pnl', pnlClass(stats.total_pnl));
   txt('kpi-pnl-sub', '24h ' + signedMoney(stats.pnl_24h));
   txt('kpi-upnl', hasPos ? signedMoney(pos.uPnL) : '—'); applyClass('kpi-upnl', pnlClass(hasPos ? pos.uPnL : 0));
-  const roe = hasPos && pos.margin ? (pos.uPnL / pos.margin) * 100 : null;
+  const roe = hasPos && pos.margin > 0.01 ? (pos.uPnL / pos.margin) * 100 : null;   // guarda: margen ~0 -> ROE "—"
   txt('kpi-roe', 'ROE ' + (roe == null ? '—' : signedPct(roe)));
   txt('kpi-win', stats.win_rate != null ? pct(stats.win_rate, 1) : '—');
   txt('kpi-pf', 'PF ' + pfLabel(stats));

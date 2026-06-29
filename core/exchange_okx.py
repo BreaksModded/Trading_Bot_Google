@@ -309,7 +309,10 @@ class OKXExchangeClient:
             "leverage": float(pos.get("leverage") or 0.0),
             "unrealized_pnl": float(pos.get("unrealizedPnl") or 0.0),
             "position_value": float(pos.get("notional") or 0.0),
-            "margin": float(pos.get("initialMargin") or pos.get("collateral") or 0.0),
+            # OKX/ccxt returns a garbage ~0 `initialMargin` for X-Perps; the real margin is
+            # in `collateral` (= info.margin). Reading initialMargin made the dashboard ROE
+            # explode (uPnL / ~0). Prefer collateral. (audit H2)
+            "margin": float(pos.get("collateral") or pos.get("initialMargin") or 0.0),
         }
 
     async def get_realized_pnl_since(self, *, symbol: str, since_ms: int) -> tuple[float, float]:
